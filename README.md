@@ -65,7 +65,8 @@ In this task $N=4$, so there are 24 + 24 = 48 complex multipole coefficients in 
     }
 }
 ```
-Prepared COMSOL model `models/model.mph` should be used as a base model and solver for optimization. 
+Prepared COMSOL model `models/model.mph` should be used as a base model and solver for optimization.
+Maximum size of the cylindrical layers should be no more than 800 nm, total height of the structure should be no more than 1600 nm.
 
 ### Navigation
 - `workflow.ipynb`: workflow example for solving the model and exporting multipole coefficients.
