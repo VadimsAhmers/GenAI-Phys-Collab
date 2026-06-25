@@ -78,8 +78,45 @@ Maximum size of the cylindrical layers should be no more than 800 nm, total heig
 - `src/target_model.py`: script for preparing `target.mph` from `models/model.mph`.
 - `src/cylinder.py`: creation of polygon geometry.
 - `src/ab_multipoles.py`: evaluating multipole coefficients from COMSOL results.
+- `src/objective.py`: geometry -> (multipole coefficients, loss) oracle.
+- `src/opt/`: bindings that drive the geometry with an LLM optimizer (see below).
 
+## Optimization
 
+`src/opt/` plugs this problem into a generic LLM black-box optimizer. The
+optimizer iteratively proposes a geometry, the physics backend returns the
+multipole coefficients, and a loss scores them — no gradients or training data.
+
+The current objective is the **multipole-channel** formulation: steer the
+scattered power into chosen channels (electric `ED, EQ, EO, EH` and magnetic
+`MD, MQ, MO, MH`), minimizing `sum_i (q_i - t_i)^2` over the normalized power
+shares `q_i`.
+
+The physics backend is an injectable `Solver` (`geometry -> coefficients`), so
+COMSOL, a future non-axisymmetric solver, or a `FakeSolver` are interchangeable:
+
+- `src/opt/solvers.py`: `Solver` protocol, `ComsolSolver` (wraps `objective.py`),
+  `FakeSolver` (synthetic; lets the loop run without COMSOL or an API key).
+- `src/opt/multipole.py`: channel powers and the channel-distribution loss.
+- `src/opt/optimize.py`: `RadiiParametrization` (search space) and
+  `MultipoleChannelObjective` (scoring).
+- `src/opt/reporter.py`: best-geometry and channel-distribution plots.
+- `src/opt/run.py`: CLI entry point.
+
+The LLM optimizer engine lives in a separate package (`llm_opt`); install its
+deps with `uv pip install openai python-dotenv pyyaml` and provide an
+`OPENROUTER_API_KEY` (in a `.env`) for LLM-driven runs.
+
+```bash
+# dry run: full loop, no COMSOL and no API key (FakeSolver + random baseline)
+python -m src.opt.run --task ed --solver fake --proposer random
+
+# real run: LLM-driven against COMSOL (needs a license and OPENROUTER_API_KEY)
+python -m src.opt.run --task ed --solver comsol --proposer llm --max-iters 50
+```
+
+Tasks: `ed` (pure electric dipole), `eq` (pure electric quadrupole), `edmd`
+(50/50 ED–MD). Runs are written to `runs/<name>/` (steps, summary, plots).
 
 ## References
 [*] Gladyshev, Sergei, et al. "Fast simulation of light scattering and harmonic generation in axially symmetric structures in COMSOL." acs photonics 11.2 (2024): 404-418.
