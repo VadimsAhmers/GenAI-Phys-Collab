@@ -6,3 +6,9 @@ pycache/
 venv/
 .ipynb_checkpoints/
 output/
+runs/
+.env
+
+# external/local-only (cloned baseline repo, hand-off materials)
+llm_opt/
+new_conversation/
