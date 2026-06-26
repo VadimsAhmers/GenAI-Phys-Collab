@@ -12,3 +12,4 @@ runs/
 # external/local-only (cloned baseline repo, hand-off materials)
 llm_opt/
 new_conversation/
+notes/

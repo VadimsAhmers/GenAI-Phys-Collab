@@ -94,6 +94,106 @@ class RadiiParametrization(Parametrization):
         return tuple(round(v, 1) for v in params["radii_nm"])
 
 
+# --- Chiral meta-atom (chiral mirror) -------------------------------------------
+# Non-axisymmetric task (Andrei B. / Maksim T.). Microwave regime: f = 5.8 GHz
+# (lambda ~ 51.7 mm); geometry is in MILLIMETRES, 4 free dimensions. Bounds and
+# frequency from Maksim T. (2026-06-26). Objective is reflectance of ONE circular
+# polarization (1 - |r|^2 -> min); the COMSOL/CST solver is injected separately.
+CHIRAL_FREQ_GHZ = 5.8
+
+# name -> (min_mm, max_mm, human description)
+CHIRAL_PARAMS = {
+    "r_mm": (5.0, 14.0, "particle radius"),
+    "h_mm": (2.0, 6.0, "thickness"),
+    "y_cut_mm": (0.0, 14.0, "cut vertical offset (0 = centred in the geometry)"),
+    "r_cut_mm": (0.0, 14.0, "cut radius"),
+}
+
+
+class ChiralParametrization(Parametrization):
+    """Search space for the chiral mirror: 4 scalar geometry params (mm).
+
+    Unlike RadiiParametrization (axisymmetric cylinder stack), this structure is
+    chiral / non-axisymmetric. Bounds and frequency are Maksim T.'s 5.8 GHz
+    example; pass `bounds` to retarget another frequency.
+    """
+
+    def __init__(
+        self,
+        bounds: dict[str, tuple[float, float]] | None = None,
+        freq_ghz: float = CHIRAL_FREQ_GHZ,
+    ) -> None:
+        self.bounds = (
+            dict(bounds)
+            if bounds is not None
+            else {k: (lo, hi) for k, (lo, hi, _desc) in CHIRAL_PARAMS.items()}
+        )
+        self.descriptions = {k: d for k, (_lo, _hi, d) in CHIRAL_PARAMS.items()}
+        self.keys = list(self.bounds)
+        self.freq_ghz = freq_ghz
+
+    def schema_hint(self) -> dict:
+        return {k: round((lo + hi) / 2, 1) for k, (lo, hi) in self.bounds.items()}
+
+    def bounds_description(self) -> str:
+        lines = [
+            f"- {k}: {self.descriptions.get(k, '')} in [{lo}, {hi}] mm"
+            for k, (lo, hi) in self.bounds.items()
+        ]
+        return (
+            f"All lengths in mm; design frequency {self.freq_ghz} GHz. The structure "
+            "is chiral (non-axisymmetric).\n" + "\n".join(lines)
+        )
+
+    def decode_llm(self, payload: dict) -> dict:
+        out: dict = {}
+        for k in self.keys:
+            if k not in payload:
+                raise ValueError(f"missing field '{k}'")
+            try:
+                out[k] = float(payload[k])
+            except (TypeError, ValueError):
+                raise ValueError(f"'{k}' must be a number")
+        return out
+
+    def validate(self, params: dict) -> list[str]:
+        errs: list[str] = []
+        for k, (lo, hi) in self.bounds.items():
+            if k not in params:
+                errs.append(f"missing '{k}'")
+                continue
+            v = params[k]
+            if not (lo <= v <= hi):
+                errs.append(f"{k}={v} out of [{lo}, {hi}] mm")
+        # NOTE: Maksim gave independent box bounds. Whether a cut larger than the
+        # body (e.g. r_cut/y_cut vs r) is geometrically degenerate is still open --
+        # add a coupling constraint here once confirmed.
+        return errs
+
+    def initial_params(self) -> dict:
+        return {k: round((lo + hi) / 2, 1) for k, (lo, hi) in self.bounds.items()}
+
+    def random_params(self, rng) -> dict:
+        return {
+            k: round(float(rng.uniform(lo, hi)), 1)
+            for k, (lo, hi) in self.bounds.items()
+        }
+
+    def format_params(self, params: dict) -> str:
+        return "{" + ", ".join(f"{k}={params[k]:.1f}" for k in self.keys) + "}"
+
+    def describe_change(self, prev: dict, cur: dict) -> str:
+        ch = [
+            f"{k}:{prev[k]:.1f}->{cur[k]:.1f}"
+            for k in self.keys
+            if abs(cur[k] - prev[k]) > 1e-6
+        ]
+        return ", ".join(ch) if ch else "no change"
+
+    def dedup_key(self, params: dict):
+        return tuple(round(params[k], 1) for k in self.keys)
+
+
 class MultipoleChannelObjective(Objective):
     """Scores a geometry by the channel-distribution loss (formulation 2).
 
