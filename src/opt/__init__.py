@@ -8,11 +8,12 @@ from src.opt.multipole import (
     NAMES_M,
     CHANNEL_ORDER,
 )
-from src.opt.solvers import Solver, FakeSolver, ComsolSolver
+from src.opt.solvers import Solver, FakeSolver, ComsolSolver, ChiralSolver
 from src.opt.optimize import (
     RadiiParametrization,
     ChiralParametrization,
     MultipoleChannelObjective,
+    ChiralReflectanceObjective,
 )
 from src.opt.reporter import MultipoleReporter
 
@@ -27,8 +28,10 @@ __all__ = [
     "Solver",
     "FakeSolver",
     "ComsolSolver",
+    "ChiralSolver",
     "RadiiParametrization",
     "ChiralParametrization",
     "MultipoleChannelObjective",
+    "ChiralReflectanceObjective",
     "MultipoleReporter",
 ]

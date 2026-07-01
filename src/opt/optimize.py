@@ -194,6 +194,48 @@ class ChiralParametrization(Parametrization):
         return tuple(round(params[k], 1) for k in self.keys)
 
 
+class ChiralReflectanceObjective(Objective):
+    """Scores a chiral-mirror geometry by 1 - |r_RR|^2 (0 = perfect one-handed mirror).
+
+    Consumes a `ChiralSolver` directly (scalar power reflection of the target
+    circular polarization) rather than the multipole `Solver` protocol -- the chiral
+    task is scalar and deliberately not reformulated through multipoles.
+    """
+
+    def __init__(self, solver) -> None:
+        self.solver = solver
+
+    def evaluate(self, params: dict) -> EvalResult:
+        r2 = self.solver(params)  # |r_RR|^2 in [0, 1]
+        score = 1.0 - r2
+        return EvalResult(
+            score=score,
+            feedback=(
+                f"|r_RR|^2 = {r2:.4f} -- reflected power of the target circular "
+                f"polarization (want 1.0). Score 1-|r_RR|^2 = {score:.4f}, aim for 0."
+            ),
+            aux={"abs_r_RR_sq": r2},
+        )
+
+    def target_description(self) -> str:
+        return (
+            "Maximize the reflected power |r_RR|^2 of the target (right-handed) "
+            "circular polarization -- a chiral mirror. Score = 1 - |r_RR|^2; 0 is a "
+            "perfect one-handed mirror."
+        )
+
+    def problem_preamble(self) -> str:
+        return (
+            "You are designing a chiral (non-axisymmetric) meta-atom that reflects a "
+            "single circular polarization at microwave frequency. A cylindrical "
+            "dielectric disk (radius r, thickness h) has an off-centre cylindrical "
+            "cut (vertical offset y_cut, radius r_cut) that breaks mirror symmetry "
+            "and makes the reflection handedness-selective. A full-wave simulation "
+            "returns the S-matrix, from which the right->right circular reflection "
+            "coefficient r_RR is computed."
+        )
+
+
 class MultipoleChannelObjective(Objective):
     """Scores a geometry by the channel-distribution loss (formulation 2).
 
