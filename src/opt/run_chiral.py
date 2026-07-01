@@ -26,6 +26,12 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--solver", default="fake", choices=["fake", "comsol"])
     p.add_argument("--proposer", default="random", choices=["random", "llm"])
+    p.add_argument(
+        "--aggressiveness",
+        default="balanced",
+        choices=["minimal", "balanced", "maximal"],
+        help="LLM proposal spread (maximal = bolder moves; helps escape plateaus)",
+    )
     p.add_argument("--max-iters", type=int, default=12)
     p.add_argument("--model", default="models/chiral.mph")
     p.add_argument("--run-name", default=None)
@@ -39,6 +45,7 @@ def main() -> None:
 
     run_name = args.run_name or f"chiral_{args.solver}_{args.proposer}"
     config = Config(run_name=run_name, proposer=args.proposer)
+    config.llm.aggressiveness = args.aggressiveness
     config.stopping.max_iters = args.max_iters
     config.stopping.score_threshold = 0.01
 
