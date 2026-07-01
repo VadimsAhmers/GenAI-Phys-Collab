@@ -81,6 +81,25 @@ class ComsolSolver:
             self._oracle.close()
 
 
+class FakeChiralSolver:
+    """Synthetic |r_RR|^2 for dry-running the chiral loop without COMSOL or an API.
+
+    NOT physical: a smooth deterministic bump over the 4 params, in (0, 1], so the
+    score varies with the candidate (dedup/feedback behave realistically). Plumbing
+    only; never for results.
+    """
+
+    KEYS = ("r_mm", "h_mm", "y_cut_mm", "r_cut_mm")
+
+    def __call__(self, params: dict) -> float:
+        v = np.array([float(params[k]) for k in self.KEYS])
+        # off the parametrization midpoint (9.5, 4, 7, 7) so a dry run actually iterates
+        center = np.array([7.0, 3.0, 4.0, 10.0])
+        scale = np.array([9.0, 4.0, 14.0, 14.0])
+        d = np.linalg.norm((v - center) / scale)
+        return float(np.exp(-2.0 * d**2))
+
+
 class ChiralSolver:
     """Chiral-mirror oracle: 4 geometry params (mm) -> |r_RR|^2 via COMSOL.
 
