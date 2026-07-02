@@ -118,5 +118,40 @@ python -m src.opt.run --task ed --solver comsol --proposer llm --max-iters 50
 Tasks: `ed` (pure electric dipole), `eq` (pure electric quadrupole), `edmd`
 (50/50 ED–MD). Runs are written to `runs/<name>/` (steps, summary, plots).
 
+### Chiral-mirror task
+
+The same package also drives a separate **chiral-mirror** task: design a
+non-axisymmetric meta-atom that reflects only one circular polarization
+(microwave, 5.8 GHz). The objective is scalar — maximize the reflected power
+`|r_RR|^2` of the target polarization, i.e. minimize `1 - |r_RR|^2` — over 4
+geometry params (mm). It does not use multipoles.
+
+- `src/opt/solvers.py`: `ChiralSolver` (COMSOL oracle reading the `r_RR` node)
+  and `FakeChiralSolver` (synthetic; dry runs without COMSOL or an API key).
+- `src/opt/optimize.py`: `ChiralParametrization` (search space) and
+  `ChiralReflectanceObjective` (scoring).
+- `src/opt/run_chiral.py`: CLI entry point.
+
+A geometry COMSOL can't mesh/solve is scored as the worst point and the run
+continues; a persistent solver/license failure aborts the run after
+`--max-consecutive-fails` consecutive failures (default 10). Run directories are
+timestamped by default so runs never overwrite each other, and a crashed run can
+be continued (`--resume`) or have its outputs rebuilt from disk (`--finalize`).
+
+```bash
+# dry run: full loop, no COMSOL and no API key (FakeChiralSolver + random)
+python -m src.opt.run_chiral --solver fake --proposer random --max-iters 12
+
+# real run: LLM-driven against COMSOL (needs a license and OPENROUTER_API_KEY)
+python -m src.opt.run_chiral --solver comsol --proposer llm --max-iters 500
+
+# continue a stopped/crashed run (re-uses saved steps, no re-evaluation)
+python -m src.opt.run_chiral --solver comsol --proposer llm \
+    --run-name <run_name> --resume --max-iters 500
+
+# rebuild a crashed run's summary/plots from its saved steps only
+python -m src.opt.run_chiral --run-name <run_name> --finalize
+```
+
 ## References
 [*] Gladyshev, Sergei, et al. "Fast simulation of light scattering and harmonic generation in axially symmetric structures in COMSOL." acs photonics 11.2 (2024): 404-418.

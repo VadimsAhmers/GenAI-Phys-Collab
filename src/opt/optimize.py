@@ -15,7 +15,7 @@ import numpy as np
 from llm_opt import Objective, Parametrization, EvalResult
 
 from src.prepare_model import N_CYL, CYL_HEIGHT, CYL_DIAMETER
-from src.opt.solvers import Solver
+from src.opt.solvers import Solver, ChiralSolveError
 from src.opt.multipole import multipole_loss, feedback_string, validate_target
 
 
@@ -202,11 +202,45 @@ class ChiralReflectanceObjective(Objective):
     task is scalar and deliberately not reformulated through multipoles.
     """
 
-    def __init__(self, solver) -> None:
+    def __init__(self, solver, max_consecutive_failures: int = 10) -> None:
         self.solver = solver
+        # Circuit breaker: abort the run after this many *consecutive* solve
+        # failures (0 disables). A dropped license / dead COMSOL server makes
+        # every solve fail; without this, the run would keep scoring 1.0 forever
+        # even though `_is_geometry_failure` mis-slots the message as recoverable.
+        # A healthy run resets the counter on any successful solve, so legitimate
+        # exploration that hits scattered bad geometries won't trip it.
+        self.max_consecutive_failures = max_consecutive_failures
+        self._consecutive_failures = 0
 
     def evaluate(self, params: dict) -> EvalResult:
-        r2 = self.solver(params)  # |r_RR|^2 in [0, 1]
+        try:
+            r2 = self.solver(params)  # |r_RR|^2 in [0, 1]
+        except ChiralSolveError as exc:
+            self._consecutive_failures += 1
+            if (
+                self.max_consecutive_failures
+                and self._consecutive_failures >= self.max_consecutive_failures
+            ):
+                raise RuntimeError(
+                    f"{self._consecutive_failures} consecutive COMSOL solve "
+                    f"failures -- aborting (likely a broken solver/license, not "
+                    f"just bad geometry). Last message: {exc}"
+                ) from exc
+            # Degenerate geometry COMSOL couldn't mesh/solve. Score it as the
+            # worst possible point (|r_RR|^2 = 0) so the optimizer avoids this
+            # region and keeps running, and tell the LLM why it was rejected.
+            return EvalResult(
+                score=1.0,
+                feedback=(
+                    "INVALID geometry: COMSOL failed to build/mesh this design "
+                    "(likely the cut intersecting the disk boundary). Treated as "
+                    "|r_RR|^2 = 0 (worst). Keep r_cut/y_cut so the cut stays inside "
+                    f"the disk body. Solver message: {exc}"
+                ),
+                aux={"abs_r_RR_sq": 0.0, "solve_failed": True},
+            )
+        self._consecutive_failures = 0
         score = 1.0 - r2
         return EvalResult(
             score=score,

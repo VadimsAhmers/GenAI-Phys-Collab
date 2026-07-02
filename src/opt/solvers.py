@@ -100,6 +100,40 @@ class FakeChiralSolver:
         return float(np.exp(-2.0 * d**2))
 
 
+class ChiralSolveError(Exception):
+    """A COMSOL solve failed for THIS geometry (bad mesh / no convergence).
+
+    Raised instead of letting the raw Java/mph exception propagate, so a single
+    invalid geometry proposed by the optimizer is scored as a bad point rather
+    than crashing the whole run. Carries the COMSOL message for LLM feedback.
+
+    Only per-geometry failures are wrapped this way (see GEOMETRY_FAIL_MARKERS);
+    infrastructure failures (lost license, dropped COMSOL server, out of memory,
+    mph/API bugs) are NOT -- they would recur on every solve, so they must abort
+    the run loudly rather than silently poison it with bogus worst-case scores.
+    """
+
+
+# Substrings (matched case-insensitively) that identify a failure specific to the
+# proposed geometry/physics point -- safe to score as a bad point and continue.
+# Anything not matching these is treated as a genuine error and re-raised.
+GEOMETRY_FAIL_MARKERS = (
+    "mesh",                     # "Failed to generate mesh", "Free Tetrahedral 1"
+    "intersecting",             # "Intersecting face elements"
+    "geometry",                 # geometry build/finalize failures
+    "multiphysics compilation", # degenerate domain -> compile error
+    "failed to find a solution",
+    "no solution",
+    "singular",                 # singular matrix (ill-posed geometry)
+    "undefined value",          # e.g. divide-by-zero from a collapsed domain
+)
+
+
+def _is_geometry_failure(message: str) -> bool:
+    msg = message.lower()
+    return any(marker in msg for marker in GEOMETRY_FAIL_MARKERS)
+
+
 class ChiralSolver:
     """Chiral-mirror oracle: 4 geometry params (mm) -> |r_RR|^2 via COMSOL.
 
@@ -141,7 +175,16 @@ class ChiralSolver:
         model = self._ensure_model()
         for key, comsol_name in self.PARAM_MAP.items():
             model.parameter(comsol_name, f"{float(params[key])}[mm]")
-        model.solve(self.STUDY)
+        try:
+            model.solve(self.STUDY)
+        except Exception as exc:  # noqa: BLE001 - mph re-raises a Java exception
+            # Only wrap failures tied to THIS geometry (bad mesh / no convergence)
+            # so the caller can score it as a bad point and continue. Everything
+            # else (lost license, dropped server, OOM, mph/API bug) would recur on
+            # every solve, so let it propagate and abort the run loudly.
+            if _is_geometry_failure(str(exc)):
+                raise ChiralSolveError(str(exc)) from exc
+            raise
         # `r_RR` node already applies abs(...)^2 -> real |r_RR|^2 in [0, 1]; the
         # port sweep yields one (identical) value per excitation, so take [0][0].
         node = model / "evaluations" / self.EVAL_NODE
