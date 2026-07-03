@@ -173,9 +173,12 @@ class ChiralSolver:
 
     def __call__(self, params: dict) -> float:
         model = self._ensure_model()
-        for key, comsol_name in self.PARAM_MAP.items():
-            model.parameter(comsol_name, f"{float(params[key])}[mm]")
         try:
+            # Setting a parameter can itself fail on a degenerate geometry: COMSOL
+            # re-evaluates selections/visualization mesh eagerly, so a bad point can
+            # blow up here (e.g. "Failed to create visualization mesh") before solve.
+            for key, comsol_name in self.PARAM_MAP.items():
+                model.parameter(comsol_name, f"{float(params[key])}[mm]")
             model.solve(self.STUDY)
         except Exception as exc:  # noqa: BLE001 - mph re-raises a Java exception
             # Only wrap failures tied to THIS geometry (bad mesh / no convergence)
