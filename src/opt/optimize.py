@@ -96,17 +96,23 @@ class RadiiParametrization(Parametrization):
 
 # --- Chiral meta-atom (chiral mirror) -------------------------------------------
 # Non-axisymmetric task (Andrei B. / Maksim T.). Microwave regime: f = 5.8 GHz
-# (lambda ~ 51.7 mm); geometry is in MILLIMETRES, 4 free dimensions. Bounds and
-# frequency from Maksim T. (2026-06-26). Objective is reflectance of ONE circular
-# polarization (1 - |r|^2 -> min); the COMSOL/CST solver is injected separately.
+# (lambda ~ 51.7 mm); geometry is in MILLIMETRES, 4 free dimensions. Objective is
+# reflectance of ONE circular polarization (1 - |r|^2 -> min); the COMSOL/CST
+# solver is injected separately.
 CHIRAL_FREQ_GHZ = 5.8
 
 # name -> (min_mm, max_mm, human description)
+# Bounds widened ~20-30% at Maksim T.'s request (2026-07-07) to push |r_RR|^2 -> 1
+# (the resonant optimum sat against the old r/h ceilings). r's upper is CAPPED by
+# the waveguide: the disk sits transverse in a 32x32 mm square guide, whose
+# inscribed circle has radius 16 mm, so r=15.5 keeps ~0.5 mm clearance to the walls
+# (larger and the disk touches/exceeds the guide). h is along propagation (L_wg =
+# 150 mm) so it can grow freely.
 CHIRAL_PARAMS = {
-    "r_mm": (5.0, 14.0, "particle radius"),
-    "h_mm": (2.0, 6.0, "thickness"),
-    "y_cut_mm": (0.0, 14.0, "cut vertical offset (0 = centred in the geometry)"),
-    "r_cut_mm": (0.0, 14.0, "cut radius"),
+    "r_mm": (4.0, 15.5, "particle radius"),
+    "h_mm": (2.0, 8.0, "thickness"),
+    "y_cut_mm": (0.0, 17.5, "cut vertical offset (0 = centred in the geometry)"),
+    "r_cut_mm": (0.0, 17.5, "cut radius"),
 }
 
 
@@ -122,6 +128,8 @@ class ChiralParametrization(Parametrization):
         self,
         bounds: dict[str, tuple[float, float]] | None = None,
         freq_ghz: float = CHIRAL_FREQ_GHZ,
+        seed: int | None = None,
+        random_init: bool = False,
     ) -> None:
         self.bounds = (
             dict(bounds)
@@ -131,6 +139,12 @@ class ChiralParametrization(Parametrization):
         self.descriptions = {k: d for k, (_lo, _hi, d) in CHIRAL_PARAMS.items()}
         self.keys = list(self.bounds)
         self.freq_ghz = freq_ghz
+        # For multistart: when `random_init` is set, step 0 is a random in-bounds
+        # point drawn from this (seeded) rng instead of the fixed midpoint, so
+        # separate runs (different `seed`) explore different basins. `seed` is the
+        # same value passed to the optimizer's Config, keeping a run reproducible.
+        self.random_init = random_init
+        self._rng = np.random.default_rng(seed)
 
     def schema_hint(self) -> dict:
         return {k: round((lo + hi) / 2, 1) for k, (lo, hi) in self.bounds.items()}
@@ -171,6 +185,9 @@ class ChiralParametrization(Parametrization):
         return errs
 
     def initial_params(self) -> dict:
+        # Random seeded start for multistart; otherwise the deterministic midpoint.
+        if self.random_init:
+            return self.random_params(self._rng)
         return {k: round((lo + hi) / 2, 1) for k, (lo, hi) in self.bounds.items()}
 
     def random_params(self, rng) -> dict:

@@ -51,6 +51,19 @@ def main() -> None:
         help="LLM proposal spread (maximal = bolder moves; helps escape plateaus)",
     )
     p.add_argument("--max-iters", type=int, default=12)
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="RNG seed (random proposer AND random init). Vary it across a "
+        "multistart sweep so each run explores a different basin.",
+    )
+    p.add_argument(
+        "--random-init",
+        action="store_true",
+        help="Start step 0 from a random in-bounds point (seeded by --seed) "
+        "instead of the fixed midpoint; use for multistart with random init.",
+    )
     p.add_argument("--model", default=str(REPO_ROOT / "models" / "chiral.mph"))
     p.add_argument(
         "--max-consecutive-fails",
@@ -100,7 +113,7 @@ def main() -> None:
         run_name = args.run_name
     else:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_name = f"chiral_{args.solver}_{args.proposer}_{stamp}"
+        run_name = f"chiral_{args.solver}_{args.proposer}_s{args.seed}_{stamp}"
 
     run_dir = REPO_ROOT / "runs" / run_name
     reusing = args.resume or args.finalize
@@ -120,12 +133,13 @@ def main() -> None:
         )
 
     solver = FakeChiralSolver() if args.solver == "fake" else ChiralSolver(model_path)
-    param = ChiralParametrization()
+    param = ChiralParametrization(seed=args.seed, random_init=args.random_init)
     objective = ChiralReflectanceObjective(
         solver=solver, max_consecutive_failures=args.max_consecutive_fails
     )
 
     config = Config(run_name=run_name, proposer=args.proposer)
+    config.seed = args.seed
     config.llm.aggressiveness = args.aggressiveness
     config.stopping.max_iters = args.max_iters
     config.stopping.score_threshold = 0.01
