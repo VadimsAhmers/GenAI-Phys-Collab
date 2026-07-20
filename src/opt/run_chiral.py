@@ -64,6 +64,13 @@ def main() -> None:
         help="Start step 0 from a random in-bounds point (seeded by --seed) "
         "instead of the fixed midpoint; use for multistart with random init.",
     )
+    p.add_argument(
+        "--optimize-eps",
+        action="store_true",
+        help="Add the dielectric permittivity eps_r as a 5th search variable "
+        "(bounds 5..10), same objective. Without this the geometry is optimized "
+        "at the model's fixed eps_r.",
+    )
     p.add_argument("--model", default=str(REPO_ROOT / "models" / "chiral.mph"))
     p.add_argument(
         "--max-consecutive-fails",
@@ -113,7 +120,8 @@ def main() -> None:
         run_name = args.run_name
     else:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_name = f"chiral_{args.solver}_{args.proposer}_s{args.seed}_{stamp}"
+        eps_tag = "_eps" if args.optimize_eps else ""
+        run_name = f"chiral_{args.solver}_{args.proposer}_s{args.seed}{eps_tag}_{stamp}"
 
     run_dir = REPO_ROOT / "runs" / run_name
     reusing = args.resume or args.finalize
@@ -133,7 +141,9 @@ def main() -> None:
         )
 
     solver = FakeChiralSolver() if args.solver == "fake" else ChiralSolver(model_path)
-    param = ChiralParametrization(seed=args.seed, random_init=args.random_init)
+    param = ChiralParametrization(
+        seed=args.seed, random_init=args.random_init, optimize_eps=args.optimize_eps
+    )
     objective = ChiralReflectanceObjective(
         solver=solver, max_consecutive_failures=args.max_consecutive_fails
     )

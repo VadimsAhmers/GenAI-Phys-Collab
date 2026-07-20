@@ -115,6 +115,24 @@ CHIRAL_PARAMS = {
     "r_cut_mm": (0.0, 17.5, "cut radius"),
 }
 
+# Optional 5th DOF: the dielectric relative permittivity. Maksim T. (2026-07-20)
+# asked to make eps_r a search variable in [5, 10] (a manufacturable low-K
+# dielectric), same objective, jointly with the geometry. It is DIMENSIONLESS, so
+# it needs no mm unit -- see CHIRAL_UNITS and ChiralSolver.PARAM_UNITS.
+CHIRAL_EPS_PARAM = {"eps_r": (5.0, 10.0, "relative permittivity (dimensionless)")}
+
+# Per-parameter unit for prompts and COMSOL parameter strings ('' = dimensionless).
+CHIRAL_UNITS = {
+    "r_mm": "mm",
+    "h_mm": "mm",
+    "y_cut_mm": "mm",
+    "r_cut_mm": "mm",
+    "eps_r": "",
+}
+
+# Combined catalog (bounds + descriptions) for looking up any param's metadata.
+_CHIRAL_CATALOG = {**CHIRAL_PARAMS, **CHIRAL_EPS_PARAM}
+
 
 class ChiralParametrization(Parametrization):
     """Search space for the chiral mirror: 4 scalar geometry params (mm).
@@ -130,13 +148,21 @@ class ChiralParametrization(Parametrization):
         freq_ghz: float = CHIRAL_FREQ_GHZ,
         seed: int | None = None,
         random_init: bool = False,
+        optimize_eps: bool = False,
     ) -> None:
-        self.bounds = (
-            dict(bounds)
-            if bounds is not None
-            else {k: (lo, hi) for k, (lo, hi, _desc) in CHIRAL_PARAMS.items()}
-        )
-        self.descriptions = {k: d for k, (_lo, _hi, d) in CHIRAL_PARAMS.items()}
+        if bounds is not None:
+            self.bounds = dict(bounds)
+        else:
+            base = dict(CHIRAL_PARAMS)
+            if optimize_eps:
+                base.update(CHIRAL_EPS_PARAM)
+            self.bounds = {k: (lo, hi) for k, (lo, hi, _desc) in base.items()}
+        # Descriptions/units pulled from the combined catalog so eps_r (and any
+        # custom `bounds` key present there) is described correctly.
+        self.descriptions = {
+            k: _CHIRAL_CATALOG.get(k, (None, None, ""))[2] for k in self.bounds
+        }
+        self.optimize_eps = optimize_eps
         self.keys = list(self.bounds)
         self.freq_ghz = freq_ghz
         # For multistart: when `random_init` is set, step 0 is a random in-bounds
@@ -150,13 +176,18 @@ class ChiralParametrization(Parametrization):
         return {k: round((lo + hi) / 2, 1) for k, (lo, hi) in self.bounds.items()}
 
     def bounds_description(self) -> str:
-        lines = [
-            f"- {k}: {self.descriptions.get(k, '')} in [{lo}, {hi}] mm"
-            for k, (lo, hi) in self.bounds.items()
-        ]
+        lines = []
+        for k, (lo, hi) in self.bounds.items():
+            unit = CHIRAL_UNITS.get(k, "mm")
+            suffix = f" {unit}" if unit else ""
+            lines.append(f"- {k}: {self.descriptions.get(k, '')} in [{lo}, {hi}]{suffix}")
+        eps_note = (
+            " eps_r is the dielectric's relative permittivity (dimensionless), a "
+            "free variable here." if self.optimize_eps else ""
+        )
         return (
             f"All lengths in mm; design frequency {self.freq_ghz} GHz. The structure "
-            "is chiral (non-axisymmetric).\n" + "\n".join(lines)
+            f"is chiral (non-axisymmetric).{eps_note}\n" + "\n".join(lines)
         )
 
     def decode_llm(self, payload: dict) -> dict:
@@ -178,7 +209,9 @@ class ChiralParametrization(Parametrization):
                 continue
             v = params[k]
             if not (lo <= v <= hi):
-                errs.append(f"{k}={v} out of [{lo}, {hi}] mm")
+                unit = CHIRAL_UNITS.get(k, "mm")
+                suffix = f" {unit}" if unit else ""
+                errs.append(f"{k}={v} out of [{lo}, {hi}]{suffix}")
         # NOTE: Maksim gave independent box bounds. Whether a cut larger than the
         # body (e.g. r_cut/y_cut vs r) is geometrically degenerate is still open --
         # add a coupling constraint here once confirmed.

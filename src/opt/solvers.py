@@ -96,8 +96,12 @@ class FakeChiralSolver:
         # off the parametrization midpoint (9.5, 4, 7, 7) so a dry run actually iterates
         center = np.array([7.0, 3.0, 4.0, 10.0])
         scale = np.array([9.0, 4.0, 14.0, 14.0])
-        d = np.linalg.norm((v - center) / scale)
-        return float(np.exp(-2.0 * d**2))
+        d2 = float(np.sum(((v - center) / scale) ** 2))
+        # Optional 5th DOF: fold eps_r into the synthetic bump (optimum near 8.5) so
+        # an `--optimize-eps` dry run varies with it too.
+        if "eps_r" in params:
+            d2 += ((float(params["eps_r"]) - 8.5) / 2.5) ** 2
+        return float(np.exp(-2.0 * d2))
 
 
 class ChiralSolveError(Exception):
@@ -154,6 +158,15 @@ class ChiralSolver:
         "h_mm": "h_disk",
         "y_cut_mm": "y_cut",
         "r_cut_mm": "r_cut",
+        "eps_r": "eps_r",  # optional 5th DOF (only set when present in params)
+    }
+    # COMSOL unit suffix per parameter ('' = dimensionless, written as a bare number).
+    PARAM_UNITS = {
+        "r_mm": "mm",
+        "h_mm": "mm",
+        "y_cut_mm": "mm",
+        "r_cut_mm": "mm",
+        "eps_r": "",
     }
     STUDY = "TE01 excitation"
     EVAL_NODE = "r_RR"
@@ -178,7 +191,11 @@ class ChiralSolver:
             # re-evaluates selections/visualization mesh eagerly, so a bad point can
             # blow up here (e.g. "Failed to create visualization mesh") before solve.
             for key, comsol_name in self.PARAM_MAP.items():
-                model.parameter(comsol_name, f"{float(params[key])}[mm]")
+                if key not in params:  # eps_r absent in a 4-DOF (geometry-only) run
+                    continue
+                unit = self.PARAM_UNITS.get(key, "mm")
+                value = f"{float(params[key])}[{unit}]" if unit else f"{float(params[key])}"
+                model.parameter(comsol_name, value)
             model.solve(self.STUDY)
         except Exception as exc:  # noqa: BLE001 - mph re-raises a Java exception
             # Only wrap failures tied to THIS geometry (bad mesh / no convergence)
