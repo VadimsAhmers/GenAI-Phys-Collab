@@ -107,10 +107,13 @@ CHIRAL_FREQ_GHZ = 5.8
 # the waveguide: the disk sits transverse in a 32x32 mm square guide, whose
 # inscribed circle has radius 16 mm, so r=15.5 keeps ~0.5 mm clearance to the walls
 # (larger and the disk touches/exceeds the guide). h is along propagation (L_wg =
-# 150 mm) so it can grow freely.
+# 150 mm) so it can grow freely. h's upper raised 8 -> 20 with Maksim T.'s approval
+# (2026-07-21) after the eps run pinned h to its ceiling; L_wg=150 mm leaves ~65 mm
+# clearance to the ports at h=20. NB: a much thicker slab is less a "thin meta-atom"
+# and more a dielectric plug -- flagged to Maksim, who is fine exploring it.
 CHIRAL_PARAMS = {
     "r_mm": (4.0, 15.5, "particle radius"),
-    "h_mm": (2.0, 8.0, "thickness"),
+    "h_mm": (2.0, 20.0, "thickness"),
     "y_cut_mm": (0.0, 17.5, "cut vertical offset (0 = centred in the geometry)"),
     "r_cut_mm": (0.0, 17.5, "cut radius"),
 }
