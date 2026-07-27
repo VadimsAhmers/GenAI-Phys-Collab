@@ -136,6 +136,19 @@ CHIRAL_UNITS = {
 # Combined catalog (bounds + descriptions) for looking up any param's metadata.
 _CHIRAL_CATALOG = {**CHIRAL_PARAMS, **CHIRAL_EPS_PARAM}
 
+# Maksim T.'s reference (provisional) geometry -- the baseline |r_RR|^2 = 0.8851
+# point at the model's native eps_r = 80. Used as an optional deterministic start
+# (`--start-reference`) when Maksim wants a run seeded from the known structure
+# rather than the midpoint (e.g. the 2026-07-25 high-eps, small-geometry request).
+# eps_r is included so it is used only when eps is a search variable.
+CHIRAL_REFERENCE = {
+    "r_mm": 6.0,
+    "h_mm": 3.4,
+    "y_cut_mm": 3.25,
+    "r_cut_mm": 2.9,
+    "eps_r": 80.0,
+}
+
 
 class ChiralParametrization(Parametrization):
     """Search space for the chiral mirror: 4 scalar geometry params (mm).
@@ -152,6 +165,7 @@ class ChiralParametrization(Parametrization):
         seed: int | None = None,
         random_init: bool = False,
         optimize_eps: bool = False,
+        start_params: dict | None = None,
     ) -> None:
         if bounds is not None:
             self.bounds = dict(bounds)
@@ -174,6 +188,23 @@ class ChiralParametrization(Parametrization):
         # same value passed to the optimizer's Config, keeping a run reproducible.
         self.random_init = random_init
         self._rng = np.random.default_rng(seed)
+        # Optional deterministic start point (e.g. Maksim's reference structure).
+        # Filtered to the active keys and clamped into bounds, so it stays valid
+        # even when the run's bounds differ from where the point came from. Takes
+        # precedence over both random_init and the midpoint. `None` = old behaviour.
+        if start_params is None:
+            self.start_params = None
+        else:
+            self.start_params = {
+                k: round(min(max(float(start_params[k]), lo), hi), 2)
+                for k, (lo, hi) in self.bounds.items()
+                if k in start_params
+            }
+            missing = [k for k in self.keys if k not in self.start_params]
+            if missing:
+                raise ValueError(
+                    f"start_params missing values for active params: {missing}"
+                )
 
     def schema_hint(self) -> dict:
         return {k: round((lo + hi) / 2, 1) for k, (lo, hi) in self.bounds.items()}
@@ -215,13 +246,30 @@ class ChiralParametrization(Parametrization):
                 unit = CHIRAL_UNITS.get(k, "mm")
                 suffix = f" {unit}" if unit else ""
                 errs.append(f"{k}={v} out of [{lo}, {hi}]{suffix}")
-        # NOTE: Maksim gave independent box bounds. Whether a cut larger than the
-        # body (e.g. r_cut/y_cut vs r) is geometrically degenerate is still open --
-        # add a coupling constraint here once confirmed.
+        # Coupling constraint (independent of the box bounds Maksim gave): the cut
+        # is a disk of radius r_cut offset y_cut from the particle centre. When
+        # r_cut >= r + y_cut the cut fully engulfs the particle disk -> nothing
+        # remains -> an EMPTY geometry that fails to mesh in COMSOL. Reject it here
+        # so the run doesn't spend a ~26 s solve to score a degenerate point (and
+        # the LLM gets a concrete reason). This only excludes the empty case: a
+        # thin crescent (r_cut just under r + y_cut) stays valid -- that family is
+        # exactly where the good solutions live (the eps=80 optimum had a ~2 mm
+        # rim). Only checked when all three lengths are present and in-bounds.
+        if not errs and all(k in params for k in ("r_mm", "y_cut_mm", "r_cut_mm")):
+            rim = params["r_mm"] + params["y_cut_mm"] - params["r_cut_mm"]
+            if rim <= 0:
+                errs.append(
+                    f"cut engulfs the disk (r_cut={params['r_cut_mm']} >= "
+                    f"r_mm+y_cut_mm={params['r_mm'] + params['y_cut_mm']:.2f}); "
+                    f"nothing remains. Reduce r_cut or increase r_mm/y_cut_mm."
+                )
         return errs
 
     def initial_params(self) -> dict:
-        # Random seeded start for multistart; otherwise the deterministic midpoint.
+        # Explicit start point wins; then random seeded start for multistart;
+        # otherwise the deterministic midpoint.
+        if self.start_params is not None:
+            return dict(self.start_params)
         if self.random_init:
             return self.random_params(self._rng)
         return {k: round((lo + hi) / 2, 1) for k, (lo, hi) in self.bounds.items()}

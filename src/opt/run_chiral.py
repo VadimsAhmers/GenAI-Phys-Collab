@@ -34,7 +34,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from llm_opt import Config, Optimizer
-from src.opt.optimize import ChiralParametrization, ChiralReflectanceObjective
+from src.opt.optimize import (
+    CHIRAL_EPS_PARAM,
+    CHIRAL_PARAMS,
+    CHIRAL_REFERENCE,
+    ChiralParametrization,
+    ChiralReflectanceObjective,
+)
 from src.opt.solvers import ChiralSolver, FakeChiralSolver
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -70,6 +76,22 @@ def main() -> None:
         help="Add the dielectric permittivity eps_r as a 5th search variable "
         "(bounds 5..10), same objective. Without this the geometry is optimized "
         "at the model's fixed eps_r.",
+    )
+    p.add_argument(
+        "--bound",
+        action="append",
+        nargs=3,
+        metavar=("NAME", "LO", "HI"),
+        default=[],
+        help="Override a parameter's bounds, e.g. --bound r_mm 4 10. Repeatable. "
+        "Applied on top of the defaults (and eps_r's default when --optimize-eps).",
+    )
+    p.add_argument(
+        "--start-reference",
+        action="store_true",
+        help="Start step 0 from Maksim's reference structure (r=6, h=3.4, "
+        "y_cut=3.25, r_cut=2.9, eps_r=80) clamped into bounds, instead of the "
+        "midpoint. Mutually exclusive with --random-init.",
     )
     p.add_argument("--model", default=str(REPO_ROOT / "models" / "chiral.mph"))
     p.add_argument(
@@ -113,6 +135,25 @@ def main() -> None:
         raise SystemExit(
             "--resume/--finalize require --run-name (the run to continue/rebuild)."
         )
+    if args.start_reference and args.random_init:
+        raise SystemExit("--start-reference and --random-init are mutually exclusive.")
+
+    # Build the bounds dict: defaults (+ eps default when optimizing eps), then
+    # apply any --bound overrides. Passing bounds explicitly bypasses the class's
+    # internal default merge, so eps must be folded in here when it is a variable.
+    bounds = {k: (lo, hi) for k, (lo, hi, _d) in CHIRAL_PARAMS.items()}
+    if args.optimize_eps:
+        bounds.update({k: (lo, hi) for k, (lo, hi, _d) in CHIRAL_EPS_PARAM.items()})
+    for name, lo_s, hi_s in args.bound:
+        if name not in bounds:
+            raise SystemExit(
+                f"--bound {name}: unknown parameter (have {list(bounds)}); "
+                f"note eps_r needs --optimize-eps to be a variable."
+            )
+        lo, hi = float(lo_s), float(hi_s)
+        if lo >= hi:
+            raise SystemExit(f"--bound {name}: LO ({lo}) must be < HI ({hi}).")
+        bounds[name] = (lo, hi)
 
     # Explicit name is used as-is (needed to resume/finalize a specific run);
     # otherwise timestamp it so each fresh run gets its own directory.
@@ -142,7 +183,11 @@ def main() -> None:
 
     solver = FakeChiralSolver() if args.solver == "fake" else ChiralSolver(model_path)
     param = ChiralParametrization(
-        seed=args.seed, random_init=args.random_init, optimize_eps=args.optimize_eps
+        bounds=bounds,
+        seed=args.seed,
+        random_init=args.random_init,
+        optimize_eps=args.optimize_eps,
+        start_params=CHIRAL_REFERENCE if args.start_reference else None,
     )
     objective = ChiralReflectanceObjective(
         solver=solver, max_consecutive_failures=args.max_consecutive_fails
