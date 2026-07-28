@@ -150,6 +150,17 @@ CHIRAL_REFERENCE = {
 }
 
 
+def cut_engulfs_disk(params: dict) -> bool:
+    """True when the cut swallows the particle disk, leaving an EMPTY geometry.
+
+    The cut is a disk of radius r_cut offset y_cut from the particle centre, so
+    what survives is a rim of width r + y_cut - r_cut. At rim <= 0 nothing is
+    left and COMSOL fails to mesh. Shared by `ChiralParametrization.validate`
+    and scripts/sweep_chiral.py so both reject the same degenerate family.
+    """
+    return params["r_mm"] + params["y_cut_mm"] - params["r_cut_mm"] <= 0
+
+
 class ChiralParametrization(Parametrization):
     """Search space for the chiral mirror: 4 scalar geometry params (mm).
 
@@ -246,18 +257,14 @@ class ChiralParametrization(Parametrization):
                 unit = CHIRAL_UNITS.get(k, "mm")
                 suffix = f" {unit}" if unit else ""
                 errs.append(f"{k}={v} out of [{lo}, {hi}]{suffix}")
-        # Coupling constraint (independent of the box bounds Maksim gave): the cut
-        # is a disk of radius r_cut offset y_cut from the particle centre. When
-        # r_cut >= r + y_cut the cut fully engulfs the particle disk -> nothing
-        # remains -> an EMPTY geometry that fails to mesh in COMSOL. Reject it here
-        # so the run doesn't spend a ~26 s solve to score a degenerate point (and
-        # the LLM gets a concrete reason). This only excludes the empty case: a
-        # thin crescent (r_cut just under r + y_cut) stays valid -- that family is
-        # exactly where the good solutions live (the eps=80 optimum had a ~2 mm
-        # rim). Only checked when all three lengths are present and in-bounds.
+        # Coupling constraint (independent of the box bounds Maksim gave): reject
+        # the degenerate empty geometry here so the run doesn't spend a ~26 s solve
+        # to score it (and the LLM gets a concrete reason). This only excludes the
+        # empty case: a thin crescent (r_cut just under r + y_cut) stays valid --
+        # that family is exactly where the good solutions live (the eps=80 optimum
+        # had a ~2 mm rim). Only checked when all three lengths are present.
         if not errs and all(k in params for k in ("r_mm", "y_cut_mm", "r_cut_mm")):
-            rim = params["r_mm"] + params["y_cut_mm"] - params["r_cut_mm"]
-            if rim <= 0:
+            if cut_engulfs_disk(params):
                 errs.append(
                     f"cut engulfs the disk (r_cut={params['r_cut_mm']} >= "
                     f"r_mm+y_cut_mm={params['r_mm'] + params['y_cut_mm']:.2f}); "

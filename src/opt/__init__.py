@@ -20,6 +20,10 @@ from src.opt.optimize import (
     ChiralParametrization,
     MultipoleChannelObjective,
     ChiralReflectanceObjective,
+    CHIRAL_PARAMS,
+    CHIRAL_EPS_PARAM,
+    CHIRAL_REFERENCE,
+    cut_engulfs_disk,
 )
 from src.opt.reporter import MultipoleReporter
 
@@ -40,5 +44,9 @@ __all__ = [
     "ChiralParametrization",
     "MultipoleChannelObjective",
     "ChiralReflectanceObjective",
+    "CHIRAL_PARAMS",
+    "CHIRAL_EPS_PARAM",
+    "CHIRAL_REFERENCE",
+    "cut_engulfs_disk",
     "MultipoleReporter",
 ]
