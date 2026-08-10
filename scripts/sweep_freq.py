@@ -73,6 +73,19 @@ from src.opt import (  # noqa: E402
 
 SECONDS_PER_SOLVE = 26.0
 
+# The 32x32 mm square guide only carries the two degenerate fundamental modes
+# between these cutoffs (c/2a and c*sqrt(2)/2a). Outside them r_RR stops meaning
+# what we think it means: ABOVE 6.625 GHz the TE11/TM11 pair propagates too, so a
+# 2-mode-per-port S-matrix no longer accounts for all the power, and just ABOVE
+# 4.684 GHz the fundamental is barely propagating, which drives |r| towards 1 for
+# any structure at all -- a spurious "resonance" at the band edge. The margins
+# keep a few percent away from both.
+A_WG_MM = 32.0
+_C_MM_GHZ = 299.792458  # speed of light in mm*GHz
+F_CUTOFF_TE10 = _C_MM_GHZ / (2 * A_WG_MM)          # 4.684 GHz
+F_CUTOFF_TE11 = _C_MM_GHZ * 2**0.5 / (2 * A_WG_MM)  # 6.625 GHz
+USABLE_BAND = (F_CUTOFF_TE10 * 1.04, F_CUTOFF_TE11 * 0.99)  # ~4.87 .. 6.56 GHz
+
 # Lengths that scale together under --scales. eps_r is deliberately NOT scaled:
 # Maxwell scale invariance moves resonances as 1/a at FIXED material.
 LENGTH_KEYS = ("r_mm", "h_mm", "y_cut_mm", "r_cut_mm")
@@ -101,7 +114,7 @@ def build_geometries(base: dict, args) -> list[tuple[str, float | str, dict]]:
 
     if args.scales:
         scales = [float(s) for s in args.scales.split(",")]
-        if 1.0 not in scales:
+        if 1.0 not in scales and not args.no_anchor:
             scales = sorted(scales + [1.0])  # the unscaled point anchors the fit
         out = []
         for a in scales:
@@ -120,6 +133,20 @@ def build_geometries(base: dict, args) -> list[tuple[str, float | str, dict]]:
         return out
 
     return [("base", 1.0, dict(base))]
+
+
+def in_usable_band(freqs: list[float], label: str, allow_multimode: bool) -> list[float]:
+    """Drop frequencies where |r_RR|^2 is not a trustworthy number (see USABLE_BAND)."""
+    if allow_multimode:
+        return freqs
+    lo, hi = USABLE_BAND
+    kept = [f for f in freqs if lo <= f <= hi]
+    dropped = len(freqs) - len(kept)
+    if dropped:
+        print(f"  {label}: dropped {dropped} of {len(freqs)} frequencies outside the "
+              f"guide's single-mode window {lo:.2f}-{hi:.2f} GHz "
+              f"(--allow-multimode to keep them)")
+    return kept
 
 
 def geom_key(params: dict) -> tuple:
@@ -219,8 +246,27 @@ def main() -> int:
         "--scales",
         help="comma-separated size factors applied to ALL lengths at once "
              "(eps_r untouched), e.g. '0.9,0.95,1.05,1.1'; 1.0 is always included")
+    ap.add_argument(
+        "--no-anchor", action="store_true",
+        help="with --scales, do not add the unscaled (1.0) geometry")
     ap.add_argument("--vary", help=f"instead of --scales, move ONE parameter: {PARAM_NAMES}")
     ap.add_argument("--values", help="comma-separated values for --vary")
+    ap.add_argument(
+        "--window", type=float, metavar="GHZ",
+        help="with --scales: instead of one band for everything, give each "
+             "geometry its own +-GHZ window centred on the PREDICTED resonance "
+             "f-ref/scale. A narrow line needs a fine grid, and a fine grid over "
+             "a whole 2 GHz band is unaffordable; the prediction is what makes a "
+             "narrow window possible (and testing it is the point of the sweep).")
+    ap.add_argument(
+        "--f-ref", type=float, default=CHIRAL_FREQ_GHZ,
+        help=f"resonance of the unscaled geometry, for --window "
+             f"(default: {CHIRAL_FREQ_GHZ})")
+    ap.add_argument(
+        "--allow-multimode", action="store_true",
+        help=f"keep frequencies outside the guide's single-mode window "
+             f"({USABLE_BAND[0]:.2f}-{USABLE_BAND[1]:.2f} GHz), where |r_RR|^2 "
+             f"is not a trustworthy number (default: drop them)")
     ap.add_argument(
         "--band", default="5.4:6.2",
         help="frequency band in GHz as LO:HI (default: 5.4:6.2)")
@@ -265,15 +311,34 @@ def main() -> int:
             raise SystemExit(f"--band {args.band!r}: expected LO:HI in GHz, e.g. 5.4:6.2")
         freqs = frange(lo, hi, args.step)
 
+    if args.window and not args.scales:
+        raise SystemExit("--window needs --scales (it centres on f-ref/scale)")
+
+    # One frequency list per geometry: with --window each is centred on that
+    # geometry's predicted resonance, otherwise they all share the CLI band.
+    plan = []
+    for label, scale, params in geometries:
+        if args.window:
+            centre = args.f_ref / float(scale)
+            grid = frange(centre - args.window, centre + args.window, args.step)
+        else:
+            grid = list(freqs)
+        plan.append((label, scale, params, in_usable_band(grid, label,
+                                                          args.allow_multimode)))
+
     out_path = Path(args.out).expanduser() if args.out else None
     done = load_done(out_path)
 
-    n_planned = len(geometries) * len(freqs)
-    n_todo = sum(1 for _, _, params in geometries
-                 for f in freqs if not _is_done(done, geom_key(params), f))
+    n_planned = sum(len(g) for _, _, _, g in plan)
+    n_todo = sum(1 for _, _, params, grid in plan
+                 for f in grid if not _is_done(done, geom_key(params), f))
     print("base: " + ", ".join(f"{k}={base[k]:g}" for k in PARAM_NAMES))
-    print(f"{len(geometries)} geometries x {len(freqs)} frequencies "
-          f"({freqs[0]:g}-{freqs[-1]:g} GHz)")
+    if args.window:
+        print(f"{len(plan)} geometries, each on its own +-{args.window * 1000:.0f} MHz "
+              f"window around {args.f_ref:g}/scale")
+    else:
+        print(f"{len(plan)} geometries x {len(freqs)} frequencies "
+              f"({freqs[0]:g}-{freqs[-1]:g} GHz)")
     if done:
         print(f"{n_planned - n_todo} points already in {out_path} -- resuming")
     if args.refine:
@@ -282,17 +347,22 @@ def main() -> int:
     print(f"~{n_todo * SECONDS_PER_SOLVE / 3600:.1f} h of COMSOL at "
           f"~{SECONDS_PER_SOLVE:.0f} s/solve (before refinement)\n")
     if args.dry_run:
-        for label, _, params in geometries:
-            print(f"  {label:>16}: " + ", ".join(f"{k}={params[k]:g}" for k in PARAM_NAMES))
+        for label, _, params, grid in plan:
+            span = f"{grid[0]:g}-{grid[-1]:g} GHz, {len(grid)} pts" if grid else "NO POINTS"
+            print(f"  {label:>16}: " +
+                  ", ".join(f"{k}={params[k]:g}" for k in PARAM_NAMES) + f"  [{span}]")
         return 0
 
     fh, writer = open_csv(out_path)
     try:
-        for label, scale, params in geometries:
+        for label, scale, params, freqs in plan:
             print(f"=== {label}: " +
                   ", ".join(f"{k}={params[k]:g}" for k in PARAM_NAMES) + " ===")
             if cut_engulfs_disk(params):
                 print("  skipped: the cut engulfs the disk (empty geometry)\n")
+                continue
+            if not freqs:
+                print("  skipped: no frequencies left inside the single-mode window\n")
                 continue
             key = geom_key(params)
             previous = done.get(key, {"values": {}, "failed": False})
