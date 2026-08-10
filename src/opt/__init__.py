@@ -22,9 +22,11 @@ from src.opt.optimize import (
     ChiralReflectanceObjective,
     CHIRAL_PARAMS,
     CHIRAL_EPS_PARAM,
+    CHIRAL_FREQ_GHZ,
     CHIRAL_REFERENCE,
     cut_engulfs_disk,
 )
+from src.opt.spectrum import spectrum_summary, format_summary
 from src.opt.reporter import MultipoleReporter
 
 __all__ = [
@@ -46,7 +48,10 @@ __all__ = [
     "ChiralReflectanceObjective",
     "CHIRAL_PARAMS",
     "CHIRAL_EPS_PARAM",
+    "CHIRAL_FREQ_GHZ",
     "CHIRAL_REFERENCE",
     "cut_engulfs_disk",
+    "spectrum_summary",
+    "format_summary",
     "MultipoleReporter",
 ]

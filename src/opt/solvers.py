@@ -91,6 +91,14 @@ class FakeChiralSolver:
 
     KEYS = ("r_mm", "h_mm", "y_cut_mm", "r_cut_mm")
 
+    # Synthetic resonance for frequency sweeps: the bump above is the peak HEIGHT,
+    # and `freq_ghz` (when asked for) multiplies it by a Lorentzian whose centre
+    # scales as 1/size, mimicking the real 1/a scaling. Lets the frequency
+    # machinery and `spectrum_summary` be exercised with no COMSOL.
+    F0_GHZ = 5.8
+    REF_R_MM = 6.0
+    FWHM_GHZ = 0.15
+
     def __call__(self, params: dict) -> float:
         v = np.array([float(params[k]) for k in self.KEYS])
         # off the parametrization midpoint (9.5, 4, 7, 7) so a dry run actually iterates
@@ -101,7 +109,12 @@ class FakeChiralSolver:
         # an `--optimize-eps` dry run varies with it too.
         if "eps_r" in params:
             d2 += ((float(params["eps_r"]) - 8.5) / 2.5) ** 2
-        return float(np.exp(-2.0 * d2))
+        height = float(np.exp(-2.0 * d2))
+        if "freq_ghz" not in params:
+            return height
+        f_res = self.F0_GHZ * self.REF_R_MM / max(float(params["r_mm"]), 1e-9)
+        detune = (float(params["freq_ghz"]) - f_res) / (self.FWHM_GHZ / 2.0)
+        return height / (1.0 + detune**2)
 
 
 class ChiralSolveError(Exception):
@@ -171,10 +184,20 @@ class ChiralSolver:
     STUDY = "TE01 excitation"
     EVAL_NODE = "r_RR"
 
+    # Optional key in `params`: solve at this frequency instead of the model's own
+    # 5.800 GHz. Unlike the geometry, frequency is NOT a global model parameter --
+    # Maksim's model hard-codes it in the study's Frequency Domain step -- so it is
+    # applied by rewriting that step's list, not via model.parameter(). Absent key
+    # => the study is left completely untouched (every existing 5.8 GHz run and
+    # sweep behaves exactly as before).
+    FREQ_KEY = "freq_ghz"
+
     def __init__(self, model_path: str = "models/chiral.mph") -> None:
         self.model_path = model_path
         self._client = None
         self._model = None
+        self._freq_features = None
+        self._freq_ghz = None
 
     def _ensure_model(self):
         if self._model is None:
@@ -184,8 +207,79 @@ class ChiralSolver:
             self._model = self._client.load(self.model_path)
         return self._model
 
+    # Study-step type whose `plist` is a FREQUENCY list. Matched on the type and
+    # not merely on "has a plist", because a Parametric Sweep step also carries a
+    # value list -- and this model sweeps the PORT (PortName) to build the
+    # S-matrix that r_RR is computed from. Writing a frequency into that list
+    # would break the port sweep silently and poison every number it produces.
+    # Matched as a case-insensitive substring of the step type ("Frequency" in
+    # 6.3/6.4) so a renamed variant still matches, while "Parametric",
+    # "Stationary" etc. never do.
+    FREQ_STEP_TYPE = "freq"
+
+    def _frequency_steps(self, model):
+        """Study steps whose frequency list can be rewritten (discovered once).
+
+        Discovered by type rather than by hard-coded tags, because the study/step
+        tags are Maksim's and may change between model revisions. Every matching
+        step in EVERY study is collected: the r_RR node reads two port-excitation
+        solutions, and a frequency applied to only some of them would silently
+        mix frequencies inside one number.
+        """
+        if self._freq_features is None:
+            steps = []
+            skipped = []
+            java = model.java
+            for study_tag in java.study().tags():
+                study = java.study(study_tag)
+                for feat_tag in study.feature().tags():
+                    feature = study.feature(feat_tag)
+                    kind = str(feature.getType())
+                    has_plist = True
+                    try:
+                        feature.getString("plist")
+                    except Exception:  # noqa: BLE001 - step carries no value list
+                        has_plist = False
+                    if self.FREQ_STEP_TYPE not in kind.lower() or not has_plist:
+                        skipped.append(f"{study_tag}/{feat_tag} ({kind})")
+                        continue
+                    steps.append((str(study_tag), str(feat_tag), feature))
+            if not steps:
+                raise RuntimeError(
+                    f"{self.model_path}: found no frequency study step (type "
+                    f"containing '{self.FREQ_STEP_TYPE}' with a 'plist'), so the "
+                    f"solve frequency cannot be set from here (saw: "
+                    f"{', '.join(skipped) or 'no steps'}). Drop "
+                    f"'{self.FREQ_KEY}' to solve at the model's own frequency."
+                )
+            # Printed once: a night of spectra hangs on this having matched the
+            # right steps, so it belongs in the log, not just in a debugger.
+            print(
+                "ChiralSolver: frequency will be set on "
+                + ", ".join(f"{s}/{f}" for s, f, _ in steps)
+                + (f" (left alone: {', '.join(skipped)})" if skipped else "")
+            )
+            self._freq_features = steps
+        return self._freq_features
+
+    def set_frequency(self, freq_ghz: float) -> None:
+        """Solve subsequent calls at `freq_ghz` (GHz). Not persisted to the file."""
+        model = self._ensure_model()
+        # Unit-carrying string: this is the form the model itself stores
+        # ("5.800[GHz]"), so it is safe alongside the step's own `punit`.
+        value = f"{float(freq_ghz)}[GHz]"
+        for _study, _feat, feature in self._frequency_steps(model):
+            feature.set("plist", value)
+        self._freq_ghz = float(freq_ghz)
+
     def __call__(self, params: dict) -> float:
         model = self._ensure_model()
+        # Outside the try: a frequency that cannot be applied is a broken model or
+        # a broken session, not a bad geometry -- it must abort, not score 0.
+        if self.FREQ_KEY in params:
+            freq_ghz = float(params[self.FREQ_KEY])
+            if freq_ghz != self._freq_ghz:
+                self.set_frequency(freq_ghz)
         try:
             # Setting a parameter can itself fail on a degenerate geometry: COMSOL
             # re-evaluates selections/visualization mesh eagerly, so a bad point can
@@ -213,3 +307,5 @@ class ChiralSolver:
     def close(self) -> None:
         self._model = None
         self._client = None
+        self._freq_features = None
+        self._freq_ghz = None
