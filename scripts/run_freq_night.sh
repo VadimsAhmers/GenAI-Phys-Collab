@@ -72,7 +72,8 @@ $RUN --vary r_mm --values 5.4,6.6 --band 5.3:6.4 --step 0.025 \
 $RUN --vary h_mm --values 3.0,3.8 --band 5.3:6.4 --step 0.025 \
      --out "$OUT/freq_axis.csv"
 
-# Stage 4 (~28 min): the converged eps<=10 crescent (|r_RR|^2 = 0.824 at 5.8).
+# Stage 4 (~28 min): the converged eps<=10 crescent (|r_RR|^2 = 0.8175 at 5.8;
+# the 0.824 this line used to quote was a stray number, see LEGACY_BEST).
 # If its true peak sits off 5.8 GHz, the single-frequency objective has been
 # scoring a mistuned structure and the band raises the ceiling, not just the
 # findability. Its geometric basin was ~6x wider relatively, so 25 MHz is ample.

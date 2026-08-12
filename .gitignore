@@ -6,6 +6,7 @@ pycache/
 venv/
 .ipynb_checkpoints/
 output/
+from_chat/
 runs/
 .env
 
