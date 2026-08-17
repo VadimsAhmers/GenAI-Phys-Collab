@@ -73,6 +73,14 @@ def peak(points):
     return x1 + 0.5 * (y0 - y2) / denom * (x1 - x0), y1 - 0.125 * (y0 - y2) ** 2 / denom
 
 
+def at_freq(points, f):
+    """Linear interpolation of |r_RR|^2 at f. Points are sorted by frequency."""
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        if x0 <= f <= x1:
+            return y0 + (y1 - y0) * (f - x0) / (x1 - x0) if x1 > x0 else y0
+    return None
+
+
 def style(ax):
     ax.set_facecolor(SURFACE)
     ax.grid(True, color="#e8e7e3", linewidth=0.8)
@@ -117,11 +125,25 @@ def main() -> int:
         ax.annotate(f"×{a:g}", xy=(fp, vp), xytext=(0, 7 + 12 * (i % 2)),
                     textcoords="offset points", color=color, fontsize=9,
                     ha="center", fontweight="bold")
+        # The whole argument of the panel: as the peak climbs, its crossing of
+        # the 5.8 GHz line drops. Mark the crossings so the eye reads both.
+        # The x0.9 and x0.92 sweeps start at 5.9 GHz and have no crossing to mark.
+        v = at_freq(points, DESIGN_FREQ)
+        if v is not None:
+            ax.plot([DESIGN_FREQ], [v], marker="o", markersize=7.5, color=color,
+                    markeredgecolor=SURFACE, markeredgewidth=1.5, zorder=5)
+            if a == 1.0:
+                ax.annotate(f"{v:.3f} — наша точка", xy=(DESIGN_FREQ, v),
+                            xytext=(-8, -2), textcoords="offset points",
+                            color=color, fontsize=9, ha="right",
+                            fontweight="bold")
     ax.annotate("идеальное отражение", xy=(5.35, 1.0), xytext=(0, -15),
                 textcoords="offset points", color=TEXT_MUTED, fontsize=9)
+    ax.annotate("точки на пунктире — значение в рабочей\nточке 5.8 ГГц: чем выше пик, тем они ниже",
+                xy=(6.62, 0.06), color=TEXT_MUTED, fontsize=9, ha="right")
     ax.set_xlabel("частота, ГГц", color=TEXT_SECONDARY, fontsize=9.5)
     ax.set_ylabel("|r$_{RR}$|²", color=TEXT_SECONDARY, fontsize=10)
-    ax.set_title("A · пик почти идеален — но на 6.3 ГГц, а не на 5.8", color=TEXT_PRIMARY,
+    ax.set_title("A · чем лучше пик, тем хуже на 5.8 ГГц", color=TEXT_PRIMARY,
                  fontsize=11, loc="left", pad=10)
 
     # --- B: peak height vs how much of the guide the disk fills ----------
