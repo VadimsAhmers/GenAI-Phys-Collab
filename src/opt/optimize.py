@@ -177,6 +177,7 @@ class ChiralParametrization(Parametrization):
         random_init: bool = False,
         optimize_eps: bool = False,
         start_params: dict | None = None,
+        frequency_window: tuple[float, float] | None = None,
     ) -> None:
         if bounds is not None:
             self.bounds = dict(bounds)
@@ -193,6 +194,7 @@ class ChiralParametrization(Parametrization):
         self.optimize_eps = optimize_eps
         self.keys = list(self.bounds)
         self.freq_ghz = freq_ghz
+        self.frequency_window = frequency_window
         # For multistart: when `random_init` is set, step 0 is a random in-bounds
         # point drawn from this (seeded) rng instead of the fixed midpoint, so
         # separate runs (different `seed`) explore different basins. `seed` is the
@@ -230,8 +232,12 @@ class ChiralParametrization(Parametrization):
             " eps_r is the dielectric's relative permittivity (dimensionless), a "
             "free variable here." if self.optimize_eps else ""
         )
+        frequency_note = (
+            f"working window {self.frequency_window[0]:g}–{self.frequency_window[1]:g} GHz"
+            if self.frequency_window else f"design frequency {self.freq_ghz} GHz"
+        )
         return (
-            f"All lengths in mm; design frequency {self.freq_ghz} GHz. The structure "
+            f"All lengths in mm; {frequency_note}. The structure "
             f"is chiral (non-axisymmetric).{eps_note}\n" + "\n".join(lines)
         )
 

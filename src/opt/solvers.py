@@ -125,6 +125,26 @@ class FakeChiralSolver:
         return {"abs_r_RR_sq": rr, "abs_r_LL_sq": 0.9 * self(shifted)}
 
 
+class FakeBandwidthSolver:
+    """Synthetic broad spectra around the October start; plumbing, NOT physics.
+
+    Separate from FakeChiralSolver so existing point-objective fixtures retain
+    their landscape. Deliberately unequal channels and width/height tradeoff.
+    """
+    def polarizations(self, params: dict) -> dict[str, float]:
+        r, h, eps = (float(params[k]) for k in ("r_mm", "h_mm", "eps_r"))
+        cut = float(params["r_cut_mm"]) - 8.3
+        offset = float(params["y_cut_mm"]) - 5.1
+        center = 5.8 + 0.025 * (13 - r) - 0.008 * (h - 24.8) - 0.02 * (eps - 7.1)
+        width = max(0.08, 0.3 + 0.009 * (h - 24.8))
+        height = 0.98 * np.exp(-0.001 * (h - 24.8)**2 - 0.003 * cut**2
+                               - 0.003 * offset**2 - 0.002 * (r - 13)**2)
+        f = float(params["freq_ghz"])
+        rr = height / (1 + ((f - center) / (width / 2))**2)
+        ll = 0.97 * height / (1 + ((f - center - 0.015) / (width / 2))**2)
+        return {"abs_r_RR_sq": float(rr), "abs_r_LL_sq": float(ll)}
+
+
 class ChiralSolveError(Exception):
     """A COMSOL solve failed for THIS geometry (bad mesh / no convergence).
 

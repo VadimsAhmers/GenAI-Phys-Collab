@@ -1,7 +1,8 @@
-"""Run the chiral-mirror optimizer (one-handed circular-polarization reflection).
+"""Run point-reflectance or common RR/LL bandwidth optimization.
 
-The task is scalar: maximize |r_RR|^2 (score = 1 - |r_RR|^2 -> 0). Geometry is the
-4 mm params of `ChiralParametrization`; the physics is COMSOL via `ChiralSolver`.
+The default point objective is 1-|r_RR|^2. --objective bandwidth maximizes the
+common continuous RR/LL >= 0.8 band within 5.5–6 GHz, starting from Maksim's
+October sample, with r<=13 mm, eps=6..11 and exploratory h=2..40 mm.
 
 Runs are written to `runs/<run_name>/` at the repo root. When `--run-name` is not
 given the name is timestamped (`chiral_<solver>_<proposer>_<YYYYmmdd_HHMMSS>`) so
@@ -27,7 +28,11 @@ Rebuild the outputs (summary + plots) of a crashed run from its saved steps only
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import math
 import os
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -41,7 +46,11 @@ from src.opt.optimize import (
     ChiralParametrization,
     ChiralReflectanceObjective,
 )
-from src.opt.solvers import ChiralSolver, FakeChiralSolver
+from src.opt.solvers import ChiralSolver, FakeChiralSolver, FakeBandwidthSolver
+from src.opt.bandwidth import (
+    BandwidthSettings, ChiralBandwidthObjective, BandwidthReporter,
+    MAKSIM_2026_BOUNDS, MAKSIM_2026_START,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -50,9 +59,17 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--solver", default="fake", choices=["fake", "comsol"])
     p.add_argument("--proposer", default="random", choices=["random", "llm"])
+    p.add_argument("--objective", default="point", choices=["point", "bandwidth"])
+    p.add_argument("--bandwidth-step", type=float, default=0.01, metavar="GHZ",
+                   help="Bandwidth grid spacing (default 10 MHz).")
+    p.add_argument("--bandwidth-edge-tol", type=float, default=0.0025, metavar="GHZ",
+                   help="Refine observed threshold brackets to this width (default 2.5 MHz).")
+    p.add_argument("--reflection-level", type=float, default=0.8,
+                   help="Absolute power-reflection threshold for BOTH channels in bandwidth mode.")
     p.add_argument(
         "--both-polarizations", action="store_true",
-        help="Record RR and LL from one solve; the score remains 1-|r_RR|^2.",
+        help="In point mode record LL diagnostically (score remains 1-RR). "
+             "Bandwidth mode always uses both channels.",
     )
     p.add_argument(
         "--aggressiveness",
@@ -141,6 +158,17 @@ def main() -> None:
         )
     if args.start_reference and args.random_init:
         raise SystemExit("--start-reference and --random-init are mutually exclusive.")
+    band_mode = args.objective == "bandwidth"
+    if band_mode and args.start_reference:
+        raise SystemExit("Bandwidth mode starts from the October sample; omit --start-reference.")
+    if args.max_iters < 1 or args.max_consecutive_fails < 0:
+        raise SystemExit("Need --max-iters >= 1 and --max-consecutive-fails >= 0.")
+    settings = BandwidthSettings(
+        step_ghz=args.bandwidth_step, edge_tolerance_ghz=args.bandwidth_edge_tol,
+        level=args.reflection_level,
+    ) if band_mode else None
+    if band_mode:
+        args.optimize_eps = True
 
     # Build the bounds dict: defaults (+ eps default when optimizing eps), then
     # apply any --bound overrides. Passing bounds explicitly bypasses the class's
@@ -148,6 +176,8 @@ def main() -> None:
     bounds = {k: (lo, hi) for k, (lo, hi, _d) in CHIRAL_PARAMS.items()}
     if args.optimize_eps:
         bounds.update({k: (lo, hi) for k, (lo, hi, _d) in CHIRAL_EPS_PARAM.items()})
+    if band_mode:
+        bounds = dict(MAKSIM_2026_BOUNDS)
     for name, lo_s, hi_s in args.bound:
         if name not in bounds:
             raise SystemExit(
@@ -155,9 +185,20 @@ def main() -> None:
                 f"note eps_r needs --optimize-eps to be a variable."
             )
         lo, hi = float(lo_s), float(hi_s)
-        if lo >= hi:
+        if not (math.isfinite(lo) and math.isfinite(hi) and lo < hi):
             raise SystemExit(f"--bound {name}: LO ({lo}) must be < HI ({hi}).")
         bounds[name] = (lo, hi)
+    if band_mode:
+        if bounds["r_mm"][1] > 13 or bounds["eps_r"][0] < 6 or bounds["eps_r"][1] > 11:
+            raise SystemExit("Bandwidth constraints: radius <=13 mm, eps_r within [6,11].")
+        if (any(bounds[k][0] <= 0 for k in ("r_mm", "h_mm"))
+                or any(bounds[k][0] < 0 for k in ("y_cut_mm", "r_cut_mm"))):
+            raise SystemExit("Lengths must be positive (cut radius/offset may be zero).")
+        if not args.random_init and any(
+            not lo <= MAKSIM_2026_START[k] <= hi for k, (lo, hi) in bounds.items()
+        ):
+            raise SystemExit("Bounds exclude the October start; no silent clipping. "
+                             "Include it or explicitly use --random-init.")
 
     # Explicit name is used as-is (needed to resume/finalize a specific run);
     # otherwise timestamp it so each fresh run gets its own directory.
@@ -166,34 +207,76 @@ def main() -> None:
     else:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         eps_tag = "_eps" if args.optimize_eps else ""
-        run_name = f"chiral_{args.solver}_{args.proposer}_s{args.seed}{eps_tag}_{stamp}"
+        objective_tag = "_bandwidth" if band_mode else ""
+        run_name = f"chiral_{args.solver}_{args.proposer}_s{args.seed}{eps_tag}{objective_tag}_{stamp}"
 
     run_dir = REPO_ROOT / "runs" / run_name
     reusing = args.resume or args.finalize
     existing_steps = (
         sorted((run_dir / "steps").glob("step_*.json")) if run_dir.exists() else []
     )
-    if reusing and not existing_steps:
+    saved_config = Config.from_yaml(run_dir / "config.yaml") if (run_dir / "config.yaml").exists() else None
+    saved_task = saved_config.extra.get("chiral", {}) if saved_config else {}
+    if reusing and not existing_steps and not (args.resume and saved_task.get("objective") == "bandwidth"):
         raise SystemExit(
             f"--resume/--finalize needs an existing run with saved steps; "
             f"none found at {run_dir}"
         )
-    if not reusing and existing_steps:
+    if not reusing and (existing_steps or
+                       (saved_config and (band_mode or saved_task.get("objective") == "bandwidth"))):
         raise SystemExit(
             f"run '{run_name}' already has {len(existing_steps)} saved steps at "
             f"{run_dir}.\nRefusing to overwrite. Use --resume to continue it, "
             f"--finalize to rebuild its outputs, or pass a different --run-name."
         )
 
-    solver = FakeChiralSolver() if args.solver == "fake" else ChiralSolver(model_path)
+    # Finalization reads recorded settings and never starts COMSOL.
+    if args.finalize and saved_task.get("objective") == "bandwidth":
+        band_mode = True
+        bounds = saved_task["bounds"]
+        args.optimize_eps = True
+        settings = BandwidthSettings(**saved_task["settings"])
+
+    manifest = {
+        "objective": args.objective,
+        "bounds": {k: list(v) for k, v in bounds.items()},
+        "solver": args.solver, "seed": args.seed, "random_init": args.random_init,
+        "proposer": args.proposer, "aggressiveness": args.aggressiveness,
+        "start_reference": args.start_reference,
+        "both_polarizations": args.both_polarizations or band_mode,
+    }
+    if band_mode and not args.finalize:
+        manifest.update({
+            "settings": asdict(settings), "start": MAKSIM_2026_START,
+            "model_sha256": hashlib.sha256(Path(model_path).read_bytes()).hexdigest()
+            if args.solver == "comsol" else None,
+            "code_sha256": {
+                name: hashlib.sha256((REPO_ROOT / name).read_bytes()).hexdigest()
+                for name in ("src/opt/bandwidth.py", "src/opt/spectrum.py", "src/opt/solvers.py")
+            },
+        })
+    if args.resume and (band_mode or saved_task.get("objective") == "bandwidth"):
+        if manifest != saved_task:
+            raise SystemExit("Resume settings/model/code differ from saved bandwidth run. "
+                             "Use the original options or a new --run-name.")
+
+    solver = None if args.finalize else (
+        (FakeBandwidthSolver() if band_mode else FakeChiralSolver())
+        if args.solver == "fake" else ChiralSolver(model_path)
+    )
     param = ChiralParametrization(
         bounds=bounds,
         seed=args.seed,
         random_init=args.random_init,
         optimize_eps=args.optimize_eps,
-        start_params=CHIRAL_REFERENCE if args.start_reference else None,
+        start_params=(MAKSIM_2026_START if band_mode and not args.random_init
+                      else CHIRAL_REFERENCE if args.start_reference else None),
+        frequency_window=(settings.f_min, settings.f_max) if band_mode else None,
     )
-    objective = ChiralReflectanceObjective(
+    objective = ChiralBandwidthObjective(
+        solver, settings=settings, cache_dir=run_dir / "spectra",
+        max_consecutive_failures=args.max_consecutive_fails,
+    ) if band_mode else ChiralReflectanceObjective(
         solver=solver, max_consecutive_failures=args.max_consecutive_fails,
         both_polarizations=args.both_polarizations,
     )
@@ -202,20 +285,25 @@ def main() -> None:
     config.seed = args.seed
     config.llm.aggressiveness = args.aggressiveness
     config.stopping.max_iters = args.max_iters
-    config.stopping.score_threshold = 0.01
+    config.stopping.score_threshold = 0.0 if band_mode else 0.01
+    config.extra["chiral"] = manifest
+    if args.finalize and saved_config:
+        config = saved_config
 
-    opt = Optimizer(config, param, objective)
+    opt = Optimizer(config, param, objective,
+                    reporter=BandwidthReporter() if band_mode else None)
     print(
         f"task=chiral solver={args.solver} proposer={args.proposer} run={run_name}"
         + (" [finalize]" if args.finalize else " [resume]" if args.resume else "")
     )
-    if args.finalize:
-        summary = opt.finalize_from_disk()
-    else:
-        summary = opt.run(resume=args.resume)
-
-    if args.solver == "comsol":
-        solver.close()
+    if band_mode and not args.finalize:
+        print(f"Common RR/LL >= {settings.level:g}; {len(settings.grid())} base frequencies "
+              f"+ threshold refinement. Bounds: {json.dumps(bounds)}", flush=True)
+    try:
+        summary = opt.finalize_from_disk() if args.finalize else opt.run(resume=args.resume)
+    finally:
+        if isinstance(solver, ChiralSolver):
+            solver.close()
     return summary
 
 

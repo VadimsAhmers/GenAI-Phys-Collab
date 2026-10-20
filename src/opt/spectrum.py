@@ -15,6 +15,56 @@ report `at_edge` / a missing `fwhm_ghz` honestly rather than extrapolating.
 """
 from __future__ import annotations
 
+import math
+
+
+def threshold_band_summary(freqs_ghz, *channels, level=0.8) -> dict:
+    """Longest common >= level interval of piecewise-linear channel spectra.
+
+    Each channel is interpolated separately, then their intervals intersected.
+    Interpolating min(RR, LL) instead would miss overlap between samples where
+    the limiting channel switches. Width is clipped to the sampled window;
+    neither extrapolation nor summing disconnected intervals is performed.
+    Unresolved peaks/dips between solver samples remain a sampling limitation.
+    """
+    fs = [float(f) for f in freqs_ghz]
+    vs = [[float(v) for v in channel] for channel in channels]
+    if (len(fs) < 2 or not vs or any(len(v) != len(fs) for v in vs)
+            or not math.isfinite(level) or not 0 < level <= 1
+            or any(not math.isfinite(x) for x in fs)
+            or any(not math.isfinite(x) for v in vs for x in v)
+            or any(b <= a for a, b in zip(fs, fs[1:]))):
+        raise ValueError("Need finite channels on a strictly increasing grid and 0 < level <= 1")
+    intervals = []
+    for i, (a, b) in enumerate(zip(fs, fs[1:])):
+        lo, hi = a, b
+        for v in vs:
+            x, y = v[i], v[i + 1]
+            if x < level and y < level:
+                lo, hi = b, a
+                break
+            if (x < level) != (y < level):
+                cross = a + (b - a) * (level - x) / (y - x)
+                if x < level:
+                    lo = max(lo, cross)
+                else:
+                    hi = min(hi, cross)
+        if lo <= hi:
+            if intervals and lo <= intervals[-1][1]:
+                intervals[-1][1] = max(intervals[-1][1], hi)
+            else:
+                intervals.append([lo, hi])
+    widest = max(intervals, key=lambda p: p[1] - p[0], default=None)
+    return {
+        "level": level,
+        "intervals_ghz": intervals,
+        "widest_interval_ghz": widest,
+        "width_ghz": widest[1] - widest[0] if widest else 0.0,
+        "touches_window_left": bool(widest and widest[0] == fs[0]),
+        "touches_window_right": bool(widest and widest[1] == fs[-1]),
+        "method": "intersection of piecewise-linear channel intervals; window-clipped",
+    }
+
 
 def spectrum_summary(freqs_ghz, values) -> dict:
     """Peak height/position and FWHM of a sampled spectrum.
