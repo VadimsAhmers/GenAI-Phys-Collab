@@ -310,8 +310,10 @@ class ChiralReflectanceObjective(Objective):
     task is scalar and deliberately not reformulated through multipoles.
     """
 
-    def __init__(self, solver, max_consecutive_failures: int = 10) -> None:
+    def __init__(self, solver, max_consecutive_failures: int = 10,
+                 both_polarizations: bool = False) -> None:
         self.solver = solver
+        self.both_polarizations = both_polarizations
         # Circuit breaker: abort the run after this many *consecutive* solve
         # failures (0 disables). A dropped license / dead COMSOL server makes
         # every solve fail; without this, the run would keep scoring 1.0 forever
@@ -323,7 +325,12 @@ class ChiralReflectanceObjective(Objective):
 
     def evaluate(self, params: dict) -> EvalResult:
         try:
-            r2 = self.solver(params)  # |r_RR|^2 in [0, 1]
+            if self.both_polarizations:
+                powers = self.solver.polarizations(params)
+                r2 = powers["abs_r_RR_sq"]
+            else:
+                r2 = self.solver(params)  # |r_RR|^2 in [0, 1]
+                powers = {"abs_r_RR_sq": r2}
         except ChiralSolveError as exc:
             self._consecutive_failures += 1
             if (
@@ -355,8 +362,11 @@ class ChiralReflectanceObjective(Objective):
             feedback=(
                 f"|r_RR|^2 = {r2:.4f} -- reflected power of the target circular "
                 f"polarization (want 1.0). Score 1-|r_RR|^2 = {score:.4f}, aim for 0."
+                + (f" Diagnostic |r_LL|^2 = {powers['abs_r_LL_sq']:.4f}; "
+                   "LL is recorded but is not part of this score."
+                   if self.both_polarizations else "")
             ),
-            aux={"abs_r_RR_sq": r2},
+            aux=powers,
         )
 
     def target_description(self) -> str:

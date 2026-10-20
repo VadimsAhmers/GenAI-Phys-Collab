@@ -51,6 +51,10 @@ def main() -> None:
     p.add_argument("--solver", default="fake", choices=["fake", "comsol"])
     p.add_argument("--proposer", default="random", choices=["random", "llm"])
     p.add_argument(
+        "--both-polarizations", action="store_true",
+        help="Record RR and LL from one solve; the score remains 1-|r_RR|^2.",
+    )
+    p.add_argument(
         "--aggressiveness",
         default="balanced",
         choices=["minimal", "balanced", "maximal"],
@@ -190,7 +194,8 @@ def main() -> None:
         start_params=CHIRAL_REFERENCE if args.start_reference else None,
     )
     objective = ChiralReflectanceObjective(
-        solver=solver, max_consecutive_failures=args.max_consecutive_fails
+        solver=solver, max_consecutive_failures=args.max_consecutive_fails,
+        both_polarizations=args.both_polarizations,
     )
 
     config = Config(run_name=run_name, proposer=args.proposer)

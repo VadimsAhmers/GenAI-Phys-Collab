@@ -1,4 +1,8 @@
-"""Frequency sweeps of the chiral-mirror oracle: |r_RR|^2 vs f (needs COMSOL).
+"""Frequency sweeps of the chiral-mirror oracle (needs COMSOL).
+
+Default: |r_RR|^2. With --both-polarizations, also save |r_LL|^2 from the same
+port-sweep solution and refine both peaks. Use a new CSV for the new columns;
+old RR-only spectra cannot supply the missing LL channel.
 
 Where `sweep_chiral.py` moves the GEOMETRY at the model's fixed 5.800 GHz, this
 moves the FREQUENCY at a fixed geometry -- the measurement the band pivot rests
@@ -160,10 +164,10 @@ def geom_key(params: dict) -> tuple:
     return tuple(round(float(params[k]), 6) for k in PARAM_NAMES)
 
 
-def load_done(path: Path) -> dict[tuple, dict]:
+def load_done(path: Path, both_polarizations: bool = False) -> dict[tuple, dict]:
     """What the CSV already holds, per geometry.
 
-    {geom_key: {"values": {freq_ghz: |r_RR|^2}, "failed": bool}}. Resuming needs
+    Entries contain RR `values`, optional LL `values_ll`, and `failed`. Resuming needs
     the VALUES, not just which points were done: the refinement grid and the
     printed summary are computed from the whole spectrum, so a resumed run must
     see the points from the earlier one.
@@ -172,28 +176,50 @@ def load_done(path: Path) -> dict[tuple, dict]:
     if not path or not path.exists():
         return done
     with path.open(newline="") as fh:
-        for row in csv.DictReader(fh):
+        reader = csv.DictReader(fh)
+        if path.stat().st_size:
+            _check_csv_fields(reader.fieldnames, both_polarizations)
+        for row in reader:
             try:
                 key = geom_key(row)
                 freq = round(float(row["freq_ghz"]), 6)
                 value = float(row["abs_r_RR_sq"])
+                ll = (float(row["abs_r_LL_sq"])
+                      if both_polarizations and row.get("status") != "solve_failed"
+                      else None)
             except (KeyError, ValueError, TypeError):
-                continue  # header/format from another script version
-            entry = done.setdefault(key, {"values": {}, "failed": False})
+                continue  # incomplete row, or missing LL: not a completed sample
+            entry = done.setdefault(key, {"values": {}, "values_ll": {}, "failed": False})
             if row.get("status") == "solve_failed":
                 entry["failed"] = True
             else:
                 entry["values"][freq] = value
+                if ll is not None:
+                    entry["values_ll"][freq] = ll
     return done
 
 
-def open_csv(path: Path | None):
+def _check_csv_fields(fields, both_polarizations):
+    expected = FIELDS + (["abs_r_LL_sq"] if both_polarizations else [])
+    if fields != expected:
+        raise ValueError(
+            "CSV columns do not match this polarization mode. Use a new --out "
+            "file; an old RR-only spectrum does not contain LL results."
+        )
+
+
+def open_csv(path: Path | None, both_polarizations: bool = False):
     """Append-mode writer that flushes every row (so a killed run keeps its data)."""
     if path is None:
         return None, None
     is_new = not path.exists() or path.stat().st_size == 0
+    if not is_new:
+        with path.open(newline="") as check:
+            _check_csv_fields(csv.DictReader(check).fieldnames, both_polarizations)
     fh = path.open("a", newline="")
-    writer = csv.DictWriter(fh, fieldnames=FIELDS)
+    writer = csv.DictWriter(
+        fh, fieldnames=FIELDS + (["abs_r_LL_sq"] if both_polarizations else []),
+    )
     if is_new:
         writer.writeheader()
         fh.flush()
@@ -275,9 +301,14 @@ def main() -> int:
         "--freqs", help="explicit comma-separated frequencies in GHz (overrides --band/--step)")
     ap.add_argument(
         "--refine", type=int, default=0, metavar="N",
-        help="after the coarse scan, re-scan around its maximum at step/N "
+        help="after the coarse scan, re-scan around each recorded channel's maximum at step/N "
              "(0 = off). Cheaper than a fine grid over the whole band.")
     ap.add_argument("--model", default="models/chiral.mph")
+    ap.add_argument(
+        "--both-polarizations", action="store_true",
+        help="Record RR and LL from one solve per frequency. Requires a new CSV "
+             "when switching from an old RR-only run; score remains 1-RR.",
+    )
     ap.add_argument(
         "--solver", default="comsol", choices=["comsol", "fake"],
         help="'fake' is a synthetic Lorentzian for checking the plumbing (never results)")
@@ -289,7 +320,7 @@ def main() -> int:
     args = ap.parse_args()
 
     solver = FakeChiralSolver() if args.solver == "fake" else ChiralSolver(args.model)
-    obj = ChiralReflectanceObjective(solver)
+    obj = ChiralReflectanceObjective(solver, both_polarizations=args.both_polarizations)
 
     if args.check:
         return run_check(obj)
@@ -327,7 +358,7 @@ def main() -> int:
                                                           args.allow_multimode)))
 
     out_path = Path(args.out).expanduser() if args.out else None
-    done = load_done(out_path)
+    done = load_done(out_path, args.both_polarizations)
 
     n_planned = sum(len(g) for _, _, _, g in plan)
     n_todo = sum(1 for _, _, params, grid in plan
@@ -342,7 +373,8 @@ def main() -> int:
     if done:
         print(f"{n_planned - n_todo} points already in {out_path} -- resuming")
     if args.refine:
-        print(f"plus up to ~{2 * args.refine} refinement points per geometry "
+        n_channels = 2 if args.both_polarizations else 1
+        print(f"plus up to ~{2 * args.refine * n_channels} refinement points per geometry "
               f"at {args.step / args.refine * 1000:.0f} MHz")
     print(f"~{n_todo * SECONDS_PER_SOLVE / 3600:.1f} h of COMSOL at "
           f"~{SECONDS_PER_SOLVE:.0f} s/solve (before refinement)\n")
@@ -353,7 +385,7 @@ def main() -> int:
                   ", ".join(f"{k}={params[k]:g}" for k in PARAM_NAMES) + f"  [{span}]")
         return 0
 
-    fh, writer = open_csv(out_path)
+    fh, writer = open_csv(out_path, args.both_polarizations)
     try:
         for label, scale, params, freqs in plan:
             print(f"=== {label}: " +
@@ -384,22 +416,33 @@ def main() -> int:
             # around the new maximum and keep solving. Off the coarse grid it is
             # idempotent -- a resumed run adds exactly what an uninterrupted one
             # would have.
-            coarse = {f: v for f, v in spectrum.items() if f in set(freqs)}
-            if args.refine and coarse:
-                summary = spectrum_summary(list(coarse), list(coarse.values()))
-                if summary["at_edge"]:
-                    print("  no refinement: the maximum is on the band edge\n")
-                else:
-                    fine_step = args.step / args.refine
-                    peak = min(coarse, key=lambda f: abs(f - summary["peak_ghz"]))
-                    fine = [f for f in frange(peak - args.step, peak + args.step, fine_step)
-                            if all(abs(f - g) > FREQ_TOL for g in spectrum)]
-                    _scan(obj, params, fine, label, scale, spectrum,
-                          writer, fh, done, stage="fine")
+            channels = {"RR": spectrum}
+            if args.both_polarizations:
+                channels["LL"] = done[key]["values_ll"]
+            fine = set()
+            for channel, values in channels.items():
+                coarse = {f: v for f, v in values.items() if f in set(freqs)}
+                if args.refine and coarse:
+                    summary = spectrum_summary(list(coarse), list(coarse.values()))
+                    if summary["at_edge"]:
+                        print(f"  {channel}: no refinement, maximum on the band edge")
+                    else:
+                        fine_step = args.step / args.refine
+                        peak = min(coarse, key=lambda f: abs(f - summary["peak_ghz"]))
+                        fine.update(f for f in frange(peak - args.step, peak + args.step, fine_step)
+                                    if all(abs(f - g) > FREQ_TOL for g in spectrum))
+            if fine:
+                failed = _scan(obj, params, sorted(fine), label, scale, spectrum,
+                               writer, fh, done, stage="fine")
+                if failed:
+                    print("  geometry failed during refinement\n")
+                    continue
 
-            if spectrum:
-                summary = spectrum_summary(list(spectrum), list(spectrum.values()))
-                print(f"  -> {format_summary(summary)}\n")
+            for channel, values in channels.items():
+                if values:
+                    summary = spectrum_summary(list(values), list(values.values()))
+                    report = format_summary(summary).replace("r_RR", f"r_{channel}")
+                    print(f"  {channel} -> {report}\n")
     finally:
         if fh is not None:
             fh.close()
@@ -424,20 +467,30 @@ def _scan(obj, params, freqs, label, scale, spectrum, writer, fh, done, stage) -
         r2 = res.aux["abs_r_RR_sq"]
         failed = res.aux.get("solve_failed", False)
         status = "solve_failed" if failed else "ok"
-        print(f"  {f:7.4f} GHz  |r_RR|^2 = {r2:.4f}" + ("  (SOLVE FAILED)" if failed else ""))
+        ll = res.aux.get("abs_r_LL_sq")
+        print(f"  {f:7.4f} GHz  |r_RR|^2 = {r2:.4f}"
+              + (f"  |r_LL|^2 = {ll:.4f}" if ll is not None else "")
+              + ("  (SOLVE FAILED)" if failed else ""))
         if writer is not None:
-            writer.writerow({
+            row = {
                 "geom": label, "scale": scale,
                 # .10g, not :g: the geometry is the resume key, and 6 significant
                 # digits would round a params.json base away from its own rows.
                 **{k: f"{params[k]:.10g}" for k in PARAM_NAMES},
                 "freq_ghz": f"{f:.6f}", "abs_r_RR_sq": f"{r2:.6f}",
                 "score": f"{res.score:.6f}", "stage": stage, "status": status,
-            })
+            }
+            if obj.both_polarizations:
+                row["abs_r_LL_sq"] = f"{ll:.6f}" if ll is not None else ""
+            writer.writerow(row)
             fh.flush()
         if failed:
             return True
         spectrum[f] = r2
+        entry = done.setdefault(key, {"values": {}, "values_ll": {}, "failed": False})
+        entry["values"][f] = r2
+        if ll is not None:
+            entry["values_ll"][f] = ll
     return False
 
 

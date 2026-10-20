@@ -116,6 +116,14 @@ class FakeChiralSolver:
         detune = (float(params["freq_ghz"]) - f_res) / (self.FWHM_GHZ / 2.0)
         return height / (1.0 + detune**2)
 
+    def polarizations(self, params: dict) -> dict[str, float]:
+        """Synthetic, deliberately different channels; not physical results."""
+        rr = self(params)
+        shifted = dict(params)
+        if "freq_ghz" in shifted:
+            shifted["freq_ghz"] -= 0.02
+        return {"abs_r_RR_sq": rr, "abs_r_LL_sq": 0.9 * self(shifted)}
+
 
 class ChiralSolveError(Exception):
     """A COMSOL solve failed for THIS geometry (bad mesh / no convergence).
@@ -151,8 +159,31 @@ def _is_geometry_failure(message: str) -> bool:
     return any(marker in msg for marker in GEOMETRY_FAIL_MARKERS)
 
 
+def _ll_expression_from_rr(expression: str) -> str:
+    """Opposite circular basis for the expression in the shipped chiral model.
+
+    RR = (S11-S22-i*(S21+S12))/2; LL changes the sign of i. This conjugates
+    the basis coefficients, NOT the complex S parameters. Refuse an unknown
+    model convention instead of silently inventing a second observable.
+    """
+    s11 = "withsol('sol4',(ewfd.S11),setval(freq,freq))"
+    s22 = "withsol('sol5',(ewfd.S22),setval(freq,freq))"
+    s21 = "withsol('sol4',(ewfd.S21),setval(freq,freq))"
+    s12 = "withsol('sol5',(ewfd.S12),setval(freq,freq))"
+    expected = f"abs(1/2*({s11}-{s22}-1i*({s21}+{s12})))^2"
+    compact = "".join(expression.split())
+    if compact != expected:
+        raise ValueError(
+            "Unrecognized r_RR expression: verify the circular-polarization "
+            "convention before deriving r_LL for this model."
+        )
+    return compact.replace("-1i*", "+1i*")
+
+
 class ChiralSolver:
     """Chiral-mirror oracle: 4 geometry params (mm) -> |r_RR|^2 via COMSOL.
+
+    `polarizations(params)` additionally returns |r_LL|^2 from the same solve.
 
     Unlike ComsolSolver (which returns multipole coefficients), this returns the
     scalar power reflection |r_RR|^2 of the target circular polarization, read from
@@ -303,6 +334,29 @@ class ChiralSolver:
         # port sweep yields one (identical) value per excitation, so take [0][0].
         node = model / "evaluations" / self.EVAL_NODE
         return float(node.java.getReal()[0][0])
+
+    def polarizations(self, params: dict) -> dict[str, float]:
+        """One port-sweep solve, then RR and LL power evaluations on that solution.
+
+        Reuse the RR node's dataset and solution selections. Only its expression
+        changes temporarily, and is restored even if LL evaluation fails. The
+        model file is never saved. Evaluation/configuration errors propagate;
+        they must not be reported as bad geometry or as zero LL reflection.
+        """
+        model = self._ensure_model()
+        node = model / "evaluations" / self.EVAL_NODE
+        original = node.property("expr")
+        expressions = [original] if isinstance(original, str) else list(original)
+        if len(expressions) != 1:
+            raise ValueError("Expected a single power expression in r_RR.")
+        ll_expression = _ll_expression_from_rr(str(expressions[0]))
+        rr = self(params)
+        try:
+            node.property("expr", [ll_expression])
+            ll = float(node.java.getReal()[0][0])
+        finally:
+            node.property("expr", original)
+        return {"abs_r_RR_sq": rr, "abs_r_LL_sq": ll}
 
     def close(self) -> None:
         self._model = None
