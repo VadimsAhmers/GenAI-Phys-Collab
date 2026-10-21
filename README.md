@@ -121,10 +121,10 @@ Tasks: `ed` (pure electric dipole), `eq` (pure electric quadrupole), `edmd`
 ### Chiral-mirror task
 
 The same package also drives a separate **chiral-mirror** task: design a
-non-axisymmetric meta-atom that reflects only one circular polarization
-(microwave, 5.8 GHz). The objective is scalar — maximize the reflected power
+non-axisymmetric microwave meta-atom. The default objective at 5.8 GHz is scalar — maximize the reflected power
 `|r_RR|^2` of the target polarization, i.e. minimize `1 - |r_RR|^2` — over 4
-geometry params (mm). It does not use multipoles.
+geometry params (mm). It does not use multipoles. High RR alone does not
+establish polarization selectivity.
 
 - `src/opt/solvers.py`: `ChiralSolver` (COMSOL oracle reading the `r_RR` node)
   and `FakeChiralSolver` (synthetic; dry runs without COMSOL or an API key).
@@ -152,6 +152,37 @@ python -m src.opt.run_chiral --solver comsol --proposer llm \
 # rebuild a crashed run's summary/plots from its saved steps only
 python -m src.opt.run_chiral --run-name <run_name> --finalize
 ```
+
+The October bandwidth objective (`--objective bandwidth`) maximizes the widest
+continuous interval where **both RR and LL are at least 0.8**, within 5.5–6 GHz.
+The score is `1 - width_GHz / 0.5`; peak heights are diagnostics. The start is
+`r=13, h=24.8, y_cut=5.1, r_cut=8.3` mm, `eps_r=7.1`. Global exploration bounds
+cap radius at 13 mm and permittivity at 6–11. Detailed spectral feedback for the
+best and recent candidates is included in the LLM request, also after resume.
+
+The short local pilot uses a 20 MHz initial grid (26 frequencies), refines
+observed threshold crossings to brackets of at most 2.5 MHz, and makes at most
+five new proposal attempts after the baseline. Temporary local bounds are
+`r=[12.5,13], h=[24.3,25.3], y_cut=[4.6,5.6], r_cut=[7.8,8.8]` mm and
+`eps_r=[6.9,7.3]`. They are exploration choices, not manufacturing limits.
+
+```bash
+# Requires the existing baseline run on the calculation machine (runs/ is ignored).
+python -m scripts.run_bandwidth_pilot --run-name bandwidth_local_20261021 \
+    --baseline-from runs/bandwidth_baseline_20261020
+# Resume: repeat the same command with --resume.
+```
+
+`--baseline-from RUN_DIR` is also available directly in `src.opt.run_chiral`.
+It checks the backend, model SHA, solver code SHA, exact geometry and saved point
+consistency before starting COMSOL. Only requested frequencies are reused;
+missing frequencies are solved and bandwidth is recomputed on the new grid.
+The source remains unchanged. Point JSON records keep source hashes and
+`solver_usage.json` separates reused points from new solver calls/time.
+Keep the source run available and unchanged for resume. Grid, model, code or
+search-setting changes require a new run name. The pilot wrapper exits with an
+error if the engine stops on an API failure, even if partial results were saved.
+Narrow unsampled peaks/dips remain possible; validate finalists on a finer grid.
 
 ## References
 [*] Gladyshev, Sergei, et al. "Fast simulation of light scattering and harmonic generation in axially symmetric structures in COMSOL." acs photonics 11.2 (2024): 404-418.

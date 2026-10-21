@@ -59,17 +59,19 @@ def write_spectrum(path: Path, rows):
     with path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["freq_ghz", *CHANNELS, "elapsed_s"])
         writer.writeheader()
-        writer.writerows(rows)
+        # Provenance of reused points stays in JSON, not in the numeric CSV.
+        writer.writerows({k: row[k] for k in writer.fieldnames} for row in rows)
 
 
 class ChiralBandwidthObjective(Objective):
     def __init__(self, solver, settings=None, cache_dir=None,
-                 max_consecutive_failures=10):
+                 max_consecutive_failures=10, baseline=None):
         self.solver = solver
         self.settings = settings or BandwidthSettings()
         self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self.max_consecutive_failures = max_consecutive_failures
         self._consecutive_failures = 0
+        self.baseline = baseline
 
     def evaluate(self, params):
         settings = self.settings
@@ -93,6 +95,10 @@ class ChiralBandwidthObjective(Objective):
                 row = json.loads(path.read_text())
                 if row["freq_ghz"] != f:
                     raise ValueError(f"Frequency mismatch in cache {path}")
+            elif self.baseline is not None and self.baseline.point(params, f) is not None:
+                row = self.baseline.point(params, f)
+                if path:
+                    write_json(path, row)
             else:
                 calls += 1
                 begin = time.monotonic()
@@ -159,6 +165,7 @@ class ChiralBandwidthObjective(Objective):
             "objective": "common_bandwidth", "settings": asdict(settings),
             "common_band": common, "channels": channel_info, "spectrum": rows,
             "n_frequency_points": len(rows), "solver_calls_new": calls,
+            "reused_frequency_points": sum("reused_from" in r for r in rows),
             "evaluation_elapsed_s": time.monotonic() - started,
             "sampled_common_peak": max(min(r[c] for c in CHANNELS) for r in rows),
             "solve_failed": False,
@@ -269,10 +276,14 @@ class BandwidthReporter(Reporter):
         # points from interrupted evaluations; an interrupted in-flight solve
         # cannot be counted as a completed call.
         cache = store.root / "spectra"
-        calls = list(cache.glob("*/point_*.json")) + list(cache.glob("*/failure_*.json"))
+        points = [json.loads(p.read_text()) for p in cache.glob("*/point_*.json")]
+        failures = [json.loads(p.read_text()) for p in cache.glob("*/failure_*.json")]
+        calls = [r for r in points if "reused_from" not in r] + failures
         write_json(store.root / "solver_usage.json", {
             "completed_solver_calls": len(calls),
-            "failed_solver_calls": len(list(cache.glob("*/failure_*.json"))),
-            "solver_elapsed_s": sum(json.loads(p.read_text())["elapsed_s"] for p in calls),
-            "note": "Completed calls only; excludes any interrupted in-flight call. Fake is not physics.",
+            "failed_solver_calls": len(failures),
+            "reused_frequency_points": sum("reused_from" in r for r in points),
+            "solver_elapsed_s": sum(r["elapsed_s"] for r in calls),
+            "note": "New completed calls only; reused points and interrupted in-flight calls "
+                    "are excluded. Fake is not physics.",
         })

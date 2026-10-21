@@ -153,7 +153,7 @@ def test_cli_fake_random_resume_finalize_and_mismatch_guard(tmp_path, monkeypatc
     # Keep all run artifacts outside the real project. Source copies are only
     # for the CLI's provenance hashes; imports still use the actual code.
     root = run_chiral.REPO_ROOT
-    for relative in ("src/opt/bandwidth.py", "src/opt/spectrum.py", "src/opt/solvers.py"):
+    for relative in run_chiral.BANDWIDTH_CODE_FILES:
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes((root / relative).read_bytes())
@@ -185,7 +185,7 @@ def test_cli_fake_random_resume_finalize_and_mismatch_guard(tmp_path, monkeypatc
 
 def test_cli_can_resume_interrupted_first_spectrum_without_any_steps(tmp_path, monkeypatch):
     root = run_chiral.REPO_ROOT
-    for relative in ("src/opt/bandwidth.py", "src/opt/spectrum.py", "src/opt/solvers.py"):
+    for relative in run_chiral.BANDWIDTH_CODE_FILES:
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes((root / relative).read_bytes())

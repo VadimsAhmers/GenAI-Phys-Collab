@@ -51,8 +51,16 @@ from src.opt.bandwidth import (
     BandwidthSettings, ChiralBandwidthObjective, BandwidthReporter,
     MAKSIM_2026_BOUNDS, MAKSIM_2026_START,
 )
+from src.opt.bandwidth_reuse import BaselineSpectrum
+from src.opt.bandwidth_search import BandwidthOptimizer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+BANDWIDTH_CODE_FILES = (
+    "src/opt/bandwidth.py", "src/opt/spectrum.py", "src/opt/solvers.py",
+    "src/opt/bandwidth_reuse.py", "src/opt/bandwidth_search.py",
+    "src/opt/run_chiral.py", "src/opt/optimize.py",
+    "llm_opt/loop.py", "llm_opt/llm.py", "llm_opt/config.py",
+)
 
 
 def main() -> None:
@@ -66,6 +74,9 @@ def main() -> None:
                    help="Refine observed threshold brackets to this width (default 2.5 MHz).")
     p.add_argument("--reflection-level", type=float, default=0.8,
                    help="Absolute power-reflection threshold for BOTH channels in bandwidth mode.")
+    p.add_argument("--baseline-from", type=Path, metavar="RUN_DIR",
+                   help="Reuse verified starting-geometry frequency points from a bandwidth run; "
+                        "recompute the score on this run's grid. Same solver/model required.")
     p.add_argument(
         "--both-polarizations", action="store_true",
         help="In point mode record LL diagnostically (score remains 1-RR). "
@@ -144,6 +155,7 @@ def main() -> None:
     # Resolve a (possibly relative) --model against the launch cwd BEFORE chdir,
     # so a user-supplied relative path still points where they meant.
     model_path = str(Path(args.model).resolve())
+    baseline_path = args.baseline_from.resolve() if args.baseline_from else None
 
     # Anchor to the repo root so runs/ and models/ resolve there regardless of the
     # directory the process was launched from (tmux, cron, a different shell, ...).
@@ -159,6 +171,8 @@ def main() -> None:
     if args.start_reference and args.random_init:
         raise SystemExit("--start-reference and --random-init are mutually exclusive.")
     band_mode = args.objective == "bandwidth"
+    if baseline_path and not args.finalize and (not band_mode or args.random_init):
+        raise SystemExit("--baseline-from requires bandwidth mode and the fixed October start.")
     if band_mode and args.start_reference:
         raise SystemExit("Bandwidth mode starts from the October sample; omit --start-reference.")
     if args.max_iters < 1 or args.max_consecutive_fails < 0:
@@ -252,9 +266,19 @@ def main() -> None:
             if args.solver == "comsol" else None,
             "code_sha256": {
                 name: hashlib.sha256((REPO_ROOT / name).read_bytes()).hexdigest()
-                for name in ("src/opt/bandwidth.py", "src/opt/spectrum.py", "src/opt/solvers.py")
+                for name in BANDWIDTH_CODE_FILES
             },
+            "spectral_history": "best_and_recent_5",
         })
+    baseline = None
+    if baseline_path and not args.finalize:
+        if baseline_path == run_dir.resolve():
+            raise SystemExit("Baseline source must be a different run directory.")
+        try:
+            baseline = BaselineSpectrum(baseline_path, manifest, MAKSIM_2026_START)
+        except (ValueError, OSError, KeyError) as exc:
+            raise SystemExit(f"Cannot reuse baseline: {exc}") from exc
+        manifest["baseline_reuse"] = baseline.manifest
     if args.resume and (band_mode or saved_task.get("objective") == "bandwidth"):
         if manifest != saved_task:
             raise SystemExit("Resume settings/model/code differ from saved bandwidth run. "
@@ -276,6 +300,7 @@ def main() -> None:
     objective = ChiralBandwidthObjective(
         solver, settings=settings, cache_dir=run_dir / "spectra",
         max_consecutive_failures=args.max_consecutive_fails,
+        baseline=baseline,
     ) if band_mode else ChiralReflectanceObjective(
         solver=solver, max_consecutive_failures=args.max_consecutive_fails,
         both_polarizations=args.both_polarizations,
@@ -284,14 +309,17 @@ def main() -> None:
     config = Config(run_name=run_name, proposer=args.proposer)
     config.seed = args.seed
     config.llm.aggressiveness = args.aggressiveness
+    if band_mode:
+        config.llm.recent_n = 5
     config.stopping.max_iters = args.max_iters
     config.stopping.score_threshold = 0.0 if band_mode else 0.01
     config.extra["chiral"] = manifest
     if args.finalize and saved_config:
         config = saved_config
 
-    opt = Optimizer(config, param, objective,
-                    reporter=BandwidthReporter() if band_mode else None)
+    optimizer_class = BandwidthOptimizer if band_mode else Optimizer
+    opt = optimizer_class(config, param, objective,
+                          reporter=BandwidthReporter() if band_mode else None)
     print(
         f"task=chiral solver={args.solver} proposer={args.proposer} run={run_name}"
         + (" [finalize]" if args.finalize else " [resume]" if args.resume else "")
@@ -299,6 +327,9 @@ def main() -> None:
     if band_mode and not args.finalize:
         print(f"Common RR/LL >= {settings.level:g}; {len(settings.grid())} base frequencies "
               f"+ threshold refinement. Bounds: {json.dumps(bounds)}", flush=True)
+        if baseline:
+            print(f"Baseline cache: {baseline.root} ({len(baseline.points)} available points; "
+                  "only requested frequencies will be reused).", flush=True)
     try:
         summary = opt.finalize_from_disk() if args.finalize else opt.run(resume=args.resume)
     finally:
