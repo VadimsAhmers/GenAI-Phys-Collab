@@ -53,12 +53,13 @@ from src.opt.bandwidth import (
 )
 from src.opt.bandwidth_reuse import BaselineSpectrum
 from src.opt.bandwidth_search import BandwidthOptimizer
+from src.opt.fillet import FilletChiralSolver, FilletParametrization, FilletBandwidthObjective
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BANDWIDTH_CODE_FILES = (
     "src/opt/bandwidth.py", "src/opt/spectrum.py", "src/opt/solvers.py",
     "src/opt/bandwidth_reuse.py", "src/opt/bandwidth_search.py",
-    "src/opt/run_chiral.py", "src/opt/optimize.py",
+    "src/opt/run_chiral.py", "src/opt/optimize.py", "src/opt/fillet.py",
     "llm_opt/loop.py", "llm_opt/llm.py", "llm_opt/config.py",
 )
 
@@ -68,6 +69,11 @@ def main() -> None:
     p.add_argument("--solver", default="fake", choices=["fake", "comsol"])
     p.add_argument("--proposer", default="random", choices=["random", "llm"])
     p.add_argument("--objective", default="point", choices=["point", "bandwidth"])
+    p.add_argument("--fillet", action="store_true",
+                   help="Use Maksim's fixed 0.5 mm fillet model; rebuild each candidate before solving.")
+    p.add_argument("--start-params", nargs=5, type=float,
+                   metavar=("R", "H", "Y_CUT", "R_CUT", "EPS"),
+                   help="Explicit bandwidth start (lengths in mm); no clipping or rounding allowed.")
     p.add_argument("--bandwidth-step", type=float, default=0.01, metavar="GHZ",
                    help="Bandwidth grid spacing (default 10 MHz).")
     p.add_argument("--bandwidth-edge-tol", type=float, default=0.0025, metavar="GHZ",
@@ -171,8 +177,13 @@ def main() -> None:
     if args.start_reference and args.random_init:
         raise SystemExit("--start-reference and --random-init are mutually exclusive.")
     band_mode = args.objective == "bandwidth"
+    if (args.fillet or args.start_params is not None) and not band_mode:
+        raise SystemExit("--fillet and --start-params require --objective bandwidth.")
+    if args.start_params is not None and (args.random_init or args.start_reference):
+        raise SystemExit("--start-params cannot be combined with another start mode.")
+    start = dict(zip(MAKSIM_2026_START, args.start_params)) if args.start_params else dict(MAKSIM_2026_START)
     if baseline_path and not args.finalize and (not band_mode or args.random_init):
-        raise SystemExit("--baseline-from requires bandwidth mode and the fixed October start.")
+        raise SystemExit("--baseline-from requires bandwidth mode and a fixed start.")
     if band_mode and args.start_reference:
         raise SystemExit("Bandwidth mode starts from the October sample; omit --start-reference.")
     if args.max_iters < 1 or args.max_consecutive_fails < 0:
@@ -209,10 +220,16 @@ def main() -> None:
                 or any(bounds[k][0] < 0 for k in ("y_cut_mm", "r_cut_mm"))):
             raise SystemExit("Lengths must be positive (cut radius/offset may be zero).")
         if not args.random_init and any(
-            not lo <= MAKSIM_2026_START[k] <= hi for k, (lo, hi) in bounds.items()
+            not lo <= start[k] <= hi for k, (lo, hi) in bounds.items()
         ):
-            raise SystemExit("Bounds exclude the October start; no silent clipping. "
+            raise SystemExit("Bounds exclude the selected start; no silent clipping. "
                              "Include it or explicitly use --random-init.")
+        if not args.random_init and any(round(v, 2) != v for v in start.values()):
+            raise SystemExit("Start parameters support at most two decimal places; no silent rounding.")
+        start_errors = (FilletParametrization if args.fillet else ChiralParametrization)(
+            bounds=bounds, optimize_eps=True).validate(start)
+        if not args.random_init and start_errors:
+            raise SystemExit("Invalid start: " + "; ".join(start_errors))
 
     # Explicit name is used as-is (needed to resume/finalize a specific run);
     # otherwise timestamp it so each fresh run gets its own directory.
@@ -250,6 +267,8 @@ def main() -> None:
         bounds = saved_task["bounds"]
         args.optimize_eps = True
         settings = BandwidthSettings(**saved_task["settings"])
+        start = saved_task["start"]
+        args.fillet = saved_task.get("fillet_radius_mm") == 0.5
 
     manifest = {
         "objective": args.objective,
@@ -261,7 +280,7 @@ def main() -> None:
     }
     if band_mode and not args.finalize:
         manifest.update({
-            "settings": asdict(settings), "start": MAKSIM_2026_START,
+            "settings": asdict(settings), "start": start,
             "model_sha256": hashlib.sha256(Path(model_path).read_bytes()).hexdigest()
             if args.solver == "comsol" else None,
             "code_sha256": {
@@ -270,12 +289,15 @@ def main() -> None:
             },
             "spectral_history": "best_and_recent_5",
         })
+        if args.fillet:
+            manifest["fillet_radius_mm"] = 0.5
+            manifest["geometry_preflight"] = "build_each_new_geometry_before_frequency_solve"
     baseline = None
     if baseline_path and not args.finalize:
         if baseline_path == run_dir.resolve():
             raise SystemExit("Baseline source must be a different run directory.")
         try:
-            baseline = BaselineSpectrum(baseline_path, manifest, MAKSIM_2026_START)
+            baseline = BaselineSpectrum(baseline_path, manifest, start)
         except (ValueError, OSError, KeyError) as exc:
             raise SystemExit(f"Cannot reuse baseline: {exc}") from exc
         manifest["baseline_reuse"] = baseline.manifest
@@ -286,18 +308,19 @@ def main() -> None:
 
     solver = None if args.finalize else (
         (FakeBandwidthSolver() if band_mode else FakeChiralSolver())
-        if args.solver == "fake" else ChiralSolver(model_path)
+        if args.solver == "fake" else
+        (FilletChiralSolver(model_path) if args.fillet else ChiralSolver(model_path))
     )
-    param = ChiralParametrization(
+    param = (FilletParametrization if args.fillet else ChiralParametrization)(
         bounds=bounds,
         seed=args.seed,
         random_init=args.random_init,
         optimize_eps=args.optimize_eps,
-        start_params=(MAKSIM_2026_START if band_mode and not args.random_init
+        start_params=(start if band_mode and not args.random_init
                       else CHIRAL_REFERENCE if args.start_reference else None),
         frequency_window=(settings.f_min, settings.f_max) if band_mode else None,
     )
-    objective = ChiralBandwidthObjective(
+    objective = (FilletBandwidthObjective if args.fillet else ChiralBandwidthObjective)(
         solver, settings=settings, cache_dir=run_dir / "spectra",
         max_consecutive_failures=args.max_consecutive_fails,
         baseline=baseline,
