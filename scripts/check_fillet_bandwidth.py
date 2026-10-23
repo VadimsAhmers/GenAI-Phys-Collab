@@ -53,19 +53,19 @@ def preflight(solver):
         model.parameter(solver.PARAM_MAP[key], f"{value}[{unit}]" if unit else str(value))
     model.build()
     geom = model.java.geom("geom1")
-    radius = float(geom.feature("fil1").getString("radius"))
+    radius = float(str(geom.feature("fil1").getString("radius")))
     if radius != 0.5 or geom.getNDomains() != 2:
         raise ValueError("Expected 0.5 mm fillets and two domains (air and disk)")
     return {
         "status": "geometry_built", "fillet_radius_mm": radius,
         "domains": int(geom.getNDomains()), "boundaries": int(geom.getNBoundaries()),
-        "geometry_bounds_mm": list(geom.getBoundingBox()),
+        "geometry_bounds_mm": [float(v) for v in geom.getBoundingBox()],
         "materials": {
-            str(tag): list(model.java.material(tag).selection().entities())
+            str(tag): [int(v) for v in model.java.material(tag).selection().entities()]
             for tag in model.java.material().tags()
         },
         "ports": {
-            str(tag): list(model.java.physics("ewfd").feature(tag).selection().entities())
+            str(tag): [int(v) for v in model.java.physics("ewfd").feature(tag).selection().entities()]
             for tag in model.java.physics("ewfd").feature().tags()
             if str(model.java.physics("ewfd").feature(tag).getType()) == "Port"
         },

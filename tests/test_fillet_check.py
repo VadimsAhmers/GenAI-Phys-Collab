@@ -1,11 +1,56 @@
 """Launch/recovery checks using synthetic spectra; no COMSOL or API calls."""
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from scripts import check_fillet_bandwidth as check
 from src.opt.bandwidth_reuse import BaselineSpectrum
 from src.opt.solvers import FakeBandwidthSolver
+
+
+def test_preflight_converts_java_values_to_python_before_json():
+    class JavaString:
+        def __str__(self):
+            return "0.5"
+
+    class JavaNumber:
+        def __init__(self, value):
+            self.value = value
+
+        def __int__(self):
+            return int(self.value)
+
+        def __float__(self):
+            return float(self.value)
+
+    geom = SimpleNamespace(
+        feature=lambda tag: SimpleNamespace(getString=lambda key: JavaString()),
+        getNDomains=lambda: 2, getNBoundaries=lambda: 18,
+        getBoundingBox=lambda: [JavaNumber(v) for v in (-16, 16, -16, 16, -150, 150)],
+    )
+    selections = SimpleNamespace(entities=lambda: [JavaNumber(1)])
+    def material(tag=None):
+        return (SimpleNamespace(tags=lambda: ["mat_air", "mat_disk"]) if tag is None
+                else SimpleNamespace(selection=lambda: selections))
+
+    def feature(tag=None):
+        return (SimpleNamespace(tags=lambda: ["port1"]) if tag is None
+                else SimpleNamespace(getType=lambda: "Port", selection=lambda: selections))
+
+    assigned = {}
+    model = SimpleNamespace(
+        parameter=lambda name, value: assigned.update({name: value}), build=lambda: None,
+        java=SimpleNamespace(geom=lambda tag: geom, material=material,
+                             physics=lambda tag: SimpleNamespace(feature=feature)),
+    )
+    solver = SimpleNamespace(_ensure_model=lambda: model,
+                             PARAM_MAP=check.ChiralSolver.PARAM_MAP,
+                             PARAM_UNITS=check.ChiralSolver.PARAM_UNITS)
+    result = check.preflight(solver)
+    assert json.loads(json.dumps(result))["fillet_radius_mm"] == 0.5
+    assert result["materials"]["mat_disk"] == [1]
+    assert assigned["eps_r"] == "7.3"
 
 
 def test_interrupted_run_resumes_and_can_supply_a_future_baseline(tmp_path, monkeypatch):

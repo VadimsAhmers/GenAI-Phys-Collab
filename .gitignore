@@ -8,9 +8,15 @@ venv/
 output/
 from_chat/
 runs/
+other/
 .env
 
 # external/local-only (cloned baseline repo, hand-off materials)
 llm_opt/
 new_conversation/
 notes/
+
+# Local model supplied by Maksim and assistant project context.
+/models/chiral_fillet_0p5.mph
+/AGENTS.md
+/docs/codex/
